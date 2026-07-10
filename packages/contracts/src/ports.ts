@@ -3,7 +3,8 @@
  * package for a two-line interface, and so tests never depend on ambient
  * global state.
  */
-import type { SlotKey } from "./slots.js";
+import type { Effect } from "./effects.js";
+import type { SlotKey, SlotValueMap } from "./slots.js";
 
 /** Injected so nothing in the system reads the wall clock directly. */
 export interface Clock {
@@ -60,6 +61,37 @@ export interface SlotExtractor {
     utterance: string,
     ctx: ExtractionContext,
   ): Promise<ExtractionOutcome>;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Utterances                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Everything an {@link Utterer} needs to turn an {@link Effect} into a sentence,
+ * and nothing more.
+ *
+ * `values` is what the caller has already established. A `READ_BACK` for a slot
+ * absent from it is a machine bug, not a phrasing problem, and `CachedUtterer`
+ * throws rather than improvising.
+ */
+export interface UtteranceContext {
+  /** The contractor's trading name, as the caller expects to hear it. */
+  readonly businessName: string;
+  /** IANA zone of the *tenant*, not the server. A window on the wrong day is a truck on the wrong day. */
+  readonly timeZone: string;
+  readonly values: Readonly<Partial<SlotValueMap>>;
+  /** Times we have already asked for this slot. Non-zero selects the reprompt form. */
+  readonly attempt: number;
+}
+
+/**
+ * Turns an Effect into words. Backed by a build-time catalog (plan, §10.2):
+ * a few hundred strings, reviewed by a human and committed, rather than a model
+ * call inside the audio path.
+ */
+export interface Utterer {
+  say(effect: Effect, ctx: UtteranceContext): Promise<string>;
 }
 
 /** Injected so retry backoff does not make the test suite slow. */

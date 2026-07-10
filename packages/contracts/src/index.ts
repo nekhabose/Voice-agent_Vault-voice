@@ -6,6 +6,7 @@
  * the backend's idea of a booking is the most likely source of silent
  * production bugs; defining them in one place eliminates it structurally.
  */
+export * from "./effects.js";
 export * from "./ports.js";
 export * from "./primitives.js";
 export * from "./slots.js";

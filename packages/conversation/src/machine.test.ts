@@ -8,6 +8,7 @@ import {
   isContained,
   isTerminal,
   makeGuards,
+  nextPrompt,
   run,
   transition,
   type Effect,
@@ -98,6 +99,25 @@ describe("GREETING", () => {
     // The name is recorded, but the call has not left GREETING.
     expect(r.context.state).toBe("GREETING");
     expect(r.context.slots.get("caller_name")?.value).toBe("Rosa");
+  });
+
+  /**
+   * A call opens with no event at all, so the worker asks the machine what to
+   * say. If this returns nothing, nobody ever speaks the AI disclosure, and the
+   * `greeting_delivered` guard deadlocks the call rather than skipping it.
+   */
+  it("tells the runtime to greet before anything has happened", () => {
+    expect(nextPrompt(initialContext())).toEqual([{ type: "GREET" }]);
+  });
+
+  it("keeps asking for the greeting while it has not landed", () => {
+    const r = transition(initialContext(), fillEvent("caller_name", "Rosa"), OPTS);
+    expect(r.effects).toEqual([{ type: "GREET" }]);
+  });
+
+  it("says nothing more once the call is over", () => {
+    const ctx = transition(initialContext(), { type: "CALLER_HUNG_UP" }, OPTS).context;
+    expect(nextPrompt(ctx)).toEqual([]);
   });
 
   it("advances to IDENTIFY once greeted, and asks for the name", () => {

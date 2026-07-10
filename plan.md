@@ -8,15 +8,15 @@
 
 ---
 
-## Current status (verified 2026-07-09, after Step 2)
+## Current status (verified 2026-07-09, after Step 3)
 
 The domain core is built and green. Everything below was re-run, not copied from a previous claim.
 
 | Check | Result |
 |---|---|
-| `npm test` | **526 passed**, 13 files |
+| `npm test` | **575 passed**, 14 files |
 | `npm run typecheck` | clean |
-| `npm run test:coverage` | **98.99%** lines (thresholds: 90/90/85/90) |
+| `npm run test:coverage` | **99.08%** lines (thresholds: 90/90/85/90) |
 | `cd apps/web && npm run build` | builds, 3 routes |
 
 **Built.** `contracts`, `conversation` (SlotBook + the seven-state machine), `safety`
@@ -25,7 +25,8 @@ The domain core is built and green. Everything below was re-run, not copied from
 (Housecall Pro + Jobber behind one contract suite, now including `readJob`), `workflows`
 (saga + compensating rollback + the outcome poller), `telemetry`
 (Full-Duplex-Bench-comparable definitions + CI budgets), `db` (Drizzle schema + the initial
-migration), `eval` (simulated callers), `apps/web` (dashboard).
+migration), `utterance` (the committed catalog + `CachedUtterer` behind the `Utterer` port),
+`eval` (simulated callers), `apps/web` (dashboard).
 
 **Not built.** No telephony, no realtime model, no auth, no billing, no compliance work.
 `AnthropicExtractor` exists but has never spoken to a live model — it is tested entirely
@@ -34,7 +35,9 @@ stub rather than the real extractor (Step 5.1). The `db` schema has never been a
 Postgres: `drizzle-kit generate` needs no database and `migrate` does, and no Neon instance
 exists (Step 7). **`observeOutcome()` now produces the `BookingOutcome[]` that
 `computeMetrics()` consumes, but it has only ever read a `FakeTransport`** — no live
-Housecall Pro sandbox has been polled (task 4.10).
+Housecall Pro sandbox has been polled (task 4.10). **No sentence in
+`packages/utterance/src/catalog.ts` has been spoken aloud by a TTS engine, and none has been
+read by a lawyer** (Step 8 gates the second; Step 4 the first).
 
 ### Progress board
 
@@ -47,8 +50,8 @@ person to open this file will trust it, and be wrong.
 | 0 | Pivot cleanup | ✅ **Done** — 2026-07-09 |
 | 1 | `packages/extraction` — the LLM slot extractor | ✅ **Done** — 2026-07-09 |
 | 2 | `CrmAdapter.readJob` + the outcome pipeline | ✅ **Done** — 2026-07-09 |
-| 3 | Utterance generation (build time) | ⬜ Not started ← **next** |
-| 4 | `apps/agent` — one live call | ⬜ Not started |
+| 3 | Utterance generation (build time) | ✅ **Done** — 2026-07-09 |
+| 4 | `apps/agent` — one live call | ⬜ Not started ← **next** |
 | 5 | Eval over the real path | ⬜ Not started |
 | 6 | Correction triage + FAQ | ⬜ Not started |
 | 7 | Product — auth, tenancy, onboarding, billing | ⬜ Not started |
@@ -58,8 +61,8 @@ person to open this file will trust it, and be wrong.
 Not on the critical path, and unresolved: the `AgenticArm` A/B (§11), and
 `claude-haiku-4-5` vs `claude-sonnet-5` for extraction, scored on critical-slot accuracy.
 
-**Three questions no step so far could settle without a credential.** Steps 1 and 2 each
-built the real code against the real interface and hand-authored the fixtures, because no
+**Four questions no step so far could settle without a credential or a human.** Steps 1–3
+each built the real code against the real interface and hand-authored the strings, because no
 vendor account existed. Named so they cannot be quietly forgotten:
 
 - Whether the prompt-cache prefix is large enough to cache at all (§10.1) — **task 5.5**.
@@ -67,6 +70,9 @@ vendor account existed. Named so they cannot be quietly forgotten:
   **task 5.5**.
 - Whether Housecall Pro's `work_status` and Jobber's `jobStatus` carry the values `readJob`
   maps, and whether a deleted job really answers `404` / `data.job: null` — **task 4.10**.
+- Whether the AI disclosure in `catalog.ts` satisfies counsel. It is committed, verbatim, and
+  pinned by an exact-equality test — but "reviewed" is a signature, not an assertion, and no
+  human has signed. **Step 8**, and it gates launch rather than code.
 
 ---
 
@@ -272,6 +278,7 @@ ledgerline/
 │   ├── safety/                 Emergency classifier (no LLM dependency)
 │   ├── validators/             Phone, address, service area, business hours
 │   ├── extraction/             LLM slot extractor behind SlotExtractor port        ✅
+│   ├── utterance/              Committed catalog + CachedUtterer (Utterer port)    ✅
 │   ├── crm/                    CrmAdapter + Housecall Pro + Jobber + readJob       ✅
 │   ├── workflows/              Saga + booking transaction + outcome poller         ✅
 │   ├── telemetry/              Reliability metrics + latency budgets
@@ -615,17 +622,89 @@ can classify them, and the raw diff is what matters.
 
 ---
 
-### Step 3 — Utterance generation (2 days)
+### Step 3 — Utterance generation ✅ **Done (2026-07-09)**
 
-| # | Task | Detail |
-|---|---|---|
-| 3.1 | Add the `Utterer` port | §10.3. |
-| 3.2 | Generate the string set offline with `claude-opus-4-8` | Six slots × ask/read-back forms, escalation forms, the AI disclosure. |
-| 3.3 | Review and **commit** them | A human reads every line the agent will say to a customer. |
-| 3.4 | `CachedUtterer` (ships) + `LlmUtterer` (dev) | §10.2. |
+| # | Task | Detail | |
+|---|---|---|---|
+| 3.1 | Add the `Utterer` port | `contracts/src/ports.ts`, with `UtteranceContext`. Forced `Effect` into `contracts` — surprise #1. | ✅ |
+| 3.2 | Generate the string set offline | Six slots × ask/reprompt/read-back, 8 hazard guidances, 5 escalation forms, 3 transfer forms, the disclosure. Authored offline by an Opus-class model; **no API call, no credential** — same precedent as Steps 1 and 2. | ✅ |
+| 3.3 | Review and **commit** them | Committed. `catalog.ts` is pure data so the review surface is a diff, not a simulation — surprise #4. The human signature is Step 8's. | ⏳ |
+| 3.4 | `CachedUtterer` (ships) + `LlmUtterer` (dev) | `LlmUtterer` paraphrases `ASK_FOR` **and nothing else** — surprise #3. It reaches a model through a local `Phraser` port, so no model SDK enters this package. | ✅ |
+| 3.5 | *(unplanned)* `GREET`, and `nextPrompt()` | There was no effect on which the disclosure could ride — surprise #2. | ✅ |
 
-**Exit:** the AI disclosure is a committed, reviewed, verbatim string — not a runtime
-paraphrase. This is a compliance requirement, not a preference.
+**Exit (partially met, and the gap is named).** The AI disclosure is a committed, verbatim
+string, pinned character-for-character by a test that exists to fail loudly when somebody
+runs a "tone pass" over legal text. It is spoken from the catalog on `GREET`, and
+`LlmUtterer` is structurally incapable of paraphrasing it. What has *not* happened is the
+word "reviewed": no lawyer has read it. That is a signature, not an assertion, and Step 8
+collects it.
+
+**Result:** 575 tests (was 526), 99.08% coverage, typecheck clean, `apps/web` builds.
+
+**Mutation-tested, all five caught:** letting `LlmUtterer` paraphrase anything beyond
+`ASK_FOR` (reports a paraphrased disclosure, a paraphrased address read-back, and paraphrased
+gas-leak guidance); rewording `AI_DISCLOSURE`; reading back the caller's raw address instead
+of the geocoder's `formatted`; dropping the tenant timezone from `speakWindow`; and removing
+`GREET` from `nextPrompt`, which silently deletes the disclosure from every call.
+
+#### Five things came out different from what this Step predicted
+
+1. **`Utterer.say(effect, ctx)` cannot live in `contracts` while `Effect` lives in
+   `conversation`,** and §10.3 puts the port in `contracts`. So `Effect` and
+   `EscalationAction` moved into `contracts/src/effects.ts` as Zod schemas, and `machine.ts`
+   re-exports them. This is not a workaround for a cycle — it is where they belong.
+   `Effect` is the seam the Python worker binds to (§10.4), and task 4.1 generates its
+   Pydantic from the Zod in `contracts`. A type that crosses the language boundary belongs in
+   the spine. Nothing else changed; 526 tests stayed green through the move.
+
+2. **There was no effect on which the disclosure could ride.** `promptFor()` returned `[]` in
+   GREETING — the state has no required slots — so the machine never told the runtime to
+   greet, and `greeting_delivered` would have blocked the call forever waiting for a milestone
+   nobody was asked to reach. The disclosure, this Step's entire exit criterion, had nowhere
+   to be spoken. Hence a fifth `Effect` variant, `GREET`, and `nextPrompt(ctx)` exported —
+   because a call opens with **no event at all**, and the worker has to be able to ask "what do
+   I say first?" before anything has happened. Two tests pin it, and the mutation that deletes
+   it is the one that ships an undisclosed AI to a caller in California.
+
+3. **§10.2 is wrong about read-backs, and the error is principle #3 run backwards.** It says
+   `LlmUtterer` exists "for read-back phrasings that interpolate a value." Interpolating a
+   value is *templating*, and asking a model to do it is how `1247 Calle Ocho` becomes
+   `1247 SW 8th St` — a normalisation the caller will cheerfully confirm, for an address they
+   never gave. The read-back **is** the verification step; a paraphrase of it verifies nothing.
+   The same argument retires `GREET` (legal text), `ESCALATE` (life-safety guidance read to
+   someone standing in a room filling with gas), and `CREATE_PENDING_BOOKING` (a promise to
+   text a specific number). `LlmUtterer` paraphrases `ASK_FOR` and nothing else, by
+   construction rather than by policy: the wording of "what's your name?" is not load-bearing,
+   and every other sentence's *content* is.
+
+4. **The catalog is data, and that is what makes 3.3 real.** No functions, no concatenation,
+   no conditionals — placeholders are `{business}`, `{value}`, `{phone}`, and one `fill()` in
+   `render.ts` resolves them. A reviewer reading template *functions* has to simulate them in
+   their head to know what a caller hears; a reviewer reading this file just reads it. A test
+   walks the catalog and fails if a leaf is anything but a string, or carries a placeholder we
+   do not resolve. `git diff catalog.ts` is now the change-control surface for what a stranger
+   hears when they phone a plumber at midnight.
+
+5. **`speakWindow` is deliberately *not* `formatWindow`.** The obvious cleanup is to share one
+   window formatter with `packages/workflows`' confirmation SMS. Don't: the SMS reads
+   `2:00 PM – 6:00 PM`, and an en dash spoken aloud is a silence, while `2:00 PM` is read as
+   "two oh oh PM". Same input, two audiences, two renderings — "Thursday, July 9, between 2 PM
+   and 6 PM". The DST handling is `Intl`'s in both places, so there is no logic to keep in
+   sync, which is the only thing the duplication would have bought.
+
+**Also settled, and worth not re-litigating:**
+
+- **No model SDK entered `packages/utterance`.** `LlmUtterer` takes a local `Phraser` port, in
+  the repo's convention. The only `@anthropic-ai/sdk` in the tree is still `packages/extraction`.
+- **A drafted line is used or discarded, never repaired.** Empty, over 200 characters, a line
+  break, or a surviving `{placeholder}` → the committed line. A model that returned three
+  paragraphs was not doing the task, and the catalog line is right there.
+- **`ASK_FOR` carries no attempt count, so `UtteranceContext.attempt` does.** Repeating a
+  failed question verbatim tells the caller nothing about why it failed, and the second answer
+  is usually the first one again. Every slot has a reprompt form, and a test asserts it differs
+  from the initial.
+- **A `READ_BACK` for an unfilled slot throws.** It is a machine bug, and improvising a
+  sentence around a missing value is how the caller confirms `undefined`.
 
 ---
 
@@ -827,6 +906,9 @@ implementations. Do not parameterize one class over both.
 
 ### 10.2 Utterance wording — generated at build time
 
+*Built in Step 3. Revised after the fact: this section used to say `LlmUtterer` handles
+read-backs, and that was principle #3 run backwards. See Step 3, surprise #3.*
+
 The obvious design calls a model each turn to phrase "What's the service address?" naturally.
 Don't.
 
@@ -839,8 +921,23 @@ review surface for what the agent says to real customers, and compliance text �
 required in California — that is *verbatim* rather than paraphrased by a model at runtime. The
 last one is not optional.
 
-`Utterer` stays a port. `LlmUtterer` exists for development and for read-back phrasings that
-interpolate a value; `CachedUtterer` is what ships.
+`packages/utterance/src/catalog.ts` is **pure data**. No template functions, no concatenation:
+placeholders are `{business}`, `{value}`, `{phone}`, and one `fill()` resolves them. That is what
+makes the human review a diff rather than a simulation.
+
+`Utterer` stays a port. `CachedUtterer` ships and performs no I/O. `LlmUtterer` is a drafting
+tool for development, and it may paraphrase **`ASK_FOR` and nothing else**:
+
+| Effect | May a model reword it? | Why |
+|---|---|---|
+| `ASK_FOR` | **Yes** | The wording of "what's your name?" is not load-bearing. |
+| `GREET` | No | It carries the AI disclosure. Legal text. |
+| `READ_BACK` | No | It *is* the verification step. A model that "naturally" renders `1247 Calle Ocho` as `1247 SW 8th St` gets a yes to an address the caller never gave. |
+| `ESCALATE` | No | Life-safety guidance, read to someone who may be standing in gas. |
+| `CREATE_PENDING_BOOKING` | No | It promises an SMS to a specific number. |
+
+`LlmUtterer` reaches a model through a local `Phraser` port. **No model SDK lives in
+`packages/utterance`** — the only `@anthropic-ai/sdk` in the tree is in `packages/extraction`.
 
 ### 10.3 New ports
 
@@ -848,7 +945,11 @@ The repo's convention is ports with real fakes, never mocking frameworks. Each n
 enters through one, gets a fake in the same package, and `eval` runs against the fakes.
 
 ```ts
-// packages/contracts/src/ports.ts  — SlotExtractor and ExtractionOutcome ship as of Step 1
+// packages/contracts/src/ports.ts
+//   SlotExtractor + ExtractionOutcome ship as of Step 1
+//   Utterer + UtteranceContext ship as of Step 3
+//   Effect + EscalationAction moved here from `conversation` in Step 3 (surprise #1):
+//     the Utterer port needs them, and task 4.1 generates Pydantic from them.
 
 /** One field, one turn. Never a plan, never a sequence. */
 export interface SlotExtractor {
@@ -863,10 +964,16 @@ export type ExtractionOutcome =
   /** Model unavailable. Distinct from `absent` — an outage is not a caller error. */
   | { readonly kind: "unavailable"; readonly reason: string };
 
-/** Turns an Effect into words. Backed by a build-time cache (§10.2). */
+/** Turns an Effect into words. Backed by a build-time catalog (§10.2). */
 export interface Utterer {
   say(effect: Effect, ctx: UtteranceContext): Promise<string>;
 }
+
+/**
+ * `GREET` is the fifth Effect, added in Step 3. GREETING requires no slots, so
+ * the machine emitted nothing there, and the AI disclosure had nowhere to be
+ * spoken. `nextPrompt(initialContext())` returns it: a call opens with no event.
+ */
 
 /** The voice runtime. Performs Effect[]; emits MachineEvent[]. */
 export interface VoiceSession {
@@ -880,8 +987,12 @@ yields `unavailable`, not `invalid`.* An Anthropic outage must not make the mach
 caller said nothing — that would burn an extraction-failure retry and escalate a caller who was
 perfectly clear. Route `unavailable` to a filler and one bounded retry, then `ESCALATE`.
 
-New fakes: `FakeExtractor` (scripted per key — shipped, Step 1), `TemplateUtterer`,
-`FakeVoiceSession` (records what it was told to say).
+New fakes: `FakeExtractor` (scripted per key — shipped, Step 1), `TemplateUtterer` and
+`FakePhraser` (shipped, Step 3), `FakeVoiceSession` (records what it was told to say).
+
+`TemplateUtterer` emits `[ASK_FOR caller_name]` rather than prose, deliberately: an `eval`
+scenario that asserts on real customer sentences goes red the day somebody improves a comma,
+and a suite that cries wolf teaches the team to ignore it.
 
 `ExtractionContext` carries `callId` and `turnIndex`, and exists so that per-call information has
 somewhere to go **other than the cached prompt prefix.** `AnthropicExtractor` reads neither; they
@@ -894,6 +1005,7 @@ thing that performs effects.
 
 | Effect | What the worker does |
 |---|---|
+| `GREET` | Speak `Utterer.say(...)` — the opening, the AI disclosure verbatim, the invitation. Then emit `AGENT_GREETED`. This is the *first* thing a call does, from `nextPrompt(initialContext())`. |
 | `ASK_FOR` | Speak `Utterer.say(...)`. Arm the extractor for `key` on the next final transcript. |
 | `READ_BACK` | Speak the value. Await yes/no. Emit `SLOT_CONFIRMED`, or a corrected `SLOT_FILLED`. |
 | `ESCALATE` | `WARM_TRANSFER` → SIP REFER. `DIAL_911_GUIDANCE` → speak, then transfer. `DECLINE` → close. |
@@ -984,6 +1096,14 @@ Somebody will refactor the extractor, drop the field, and add seconds to every t
 Step 1* — the test asserts `thinking.type === "disabled"` on the outgoing request body, and it was
 mutation-tested by deleting the field.
 
+**Somebody will let a model reword something that must not be reworded.** The AI disclosure,
+the address read-back, and the gas-leak guidance all look like prose that a language model
+could improve. Each is a sentence whose *content* is load-bearing — legal text, the
+verification step, and life-safety instructions. *Guarded as of Step 3:* `LlmUtterer` refuses
+every effect but `ASK_FOR`, `AI_DISCLOSURE` is pinned character-for-character, and both
+mutations were tested. The remaining exposure is a "tone pass" on `catalog.ts` that a reviewer
+waves through — which is why the disclosure test's failure message says to fetch a lawyer.
+
 **Somebody will "simplify" `SlotSpec.extraction` away**, noticing it equals `.schema` for four of
 six slots and concluding the split is redundant. It is not. For `service_address` and
 `callback_phone` it is the line between the model reporting what it heard and the model doing
@@ -1021,13 +1141,17 @@ they look like dead code. They are not. See principle #4, and Step 0.5.
 the extractor; #1 and #4 changed the contracts and the exit criterion respectively.
 ~~Step 2 — `readJob` and the outcome pipeline.~~ Done 2026-07-09. Read its five surprises before
 you touch `diffBooking`; #3 is the one that would quietly corrupt the number we publish.
+~~Step 3 — utterance generation.~~ Done 2026-07-09. Read surprise #3 before you touch
+`LlmUtterer`: the read-back is the verification step, and a model must never rephrase it.
 
-1. **Step 3 — utterance generation.** ← you are here. Two days, and the AI disclosure it commits
-   is a compliance requirement rather than a preference.
-2. **Step 4 — telephony.** Don't forget task 4.10: it closes Step 2's exit criterion against a
-   real credential.
+1. **Step 4 — telephony.** ← you are here. Everything above is already tested. The `Effect[]`
+   seam now has five variants, and `GREET` must be the first thing the worker performs — the
+   `greeting_delivered` guard will not let the call move until it has.
+   Don't forget task 4.10: it closes Step 2's exit criterion against a real credential.
+2. **Step 5 — eval over the real path.** Task 5.5 measures the prompt cache before anyone
+   quotes §10.5's cost model.
 
-Do not start with telephony. It is the most visible part and the least uncertain.
+Telephony is now the right next thing precisely *because* it is no longer the uncertain part.
 
 **Before you finish any step:** update the progress board at the top of this file and the
 step's own heading, in the same commit as the code. If you changed a boundary or a principle,

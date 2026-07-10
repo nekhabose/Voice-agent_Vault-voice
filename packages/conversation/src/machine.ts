@@ -5,12 +5,21 @@ import {
   STATE_SPECS,
   type CallOutcome,
   type CallState,
+  type Effect,
+  type EscalationAction,
   type EscalationReason,
   type Guard,
   type HazardDetection,
   type SlotKey,
 } from "@ledgerline/contracts";
 import { SlotBook, type FillInput } from "./slot-book.js";
+
+/**
+ * `Effect` and `EscalationAction` are defined in `contracts` — they cross into
+ * `Utterer` and, at Step 4, into the Python worker. Re-exported here because
+ * this module is where they are produced.
+ */
+export type { Effect, EscalationAction };
 
 /* -------------------------------------------------------------------------- */
 /* Context                                                                     */
@@ -108,28 +117,6 @@ export type MachineEvent =
   | { readonly type: "CALLER_REQUESTED_HUMAN" }
   | { readonly type: "CALLER_HUNG_UP" };
 
-export type EscalationAction =
-  | "WARM_TRANSFER"
-  | "DIAL_911_GUIDANCE"
-  /** Out of service area: no human needed, just a courteous close. */
-  | "DECLINE";
-
-/**
- * What the voice runtime should do next. The machine decides; the audio layer
- * merely performs. Keeping this a data structure is what makes the whole graph
- * testable without a phone.
- */
-export type Effect =
-  | { readonly type: "ASK_FOR"; readonly key: SlotKey }
-  | { readonly type: "READ_BACK"; readonly key: SlotKey }
-  | {
-      readonly type: "ESCALATE";
-      readonly reason: EscalationReason;
-      readonly action: EscalationAction;
-      readonly hazard: HazardDetection | null;
-    }
-  | { readonly type: "CREATE_PENDING_BOOKING" };
-
 export interface TransitionResult {
   readonly context: MachineContext;
   /** States entered, in order. Empty when the event moved nothing. */
@@ -204,7 +191,7 @@ export function transition(
     effects: [
       ...applied.effects,
       ...advanced.effects,
-      ...promptFor(advanced.context),
+      ...nextPrompt(advanced.context),
     ],
     rejection: null,
   };
@@ -420,13 +407,23 @@ function advance(start: MachineContext, guards: GuardSet): AdvanceResult {
 }
 
 /**
- * What the agent should say next: read back an unconfirmed critical slot, or
- * ask for the next missing required one. Exactly one prompt per turn — the
- * model is never handed a menu of tools to choose between (plan, principle #1).
+ * What the agent should say next: greet, read back an unconfirmed critical
+ * slot, or ask for the next missing required one. Exactly one prompt per turn —
+ * the model is never handed a menu of tools to choose between (plan,
+ * principle #1).
+ *
+ * Exported because a call opens with no event at all. The worker asks
+ * `nextPrompt(initialContext())` and is told to `GREET`, which is how the AI
+ * disclosure reaches the caller before the `greeting_delivered` guard will let
+ * the call move.
  */
-function promptFor(ctx: MachineContext): readonly Effect[] {
+export function nextPrompt(ctx: MachineContext): readonly Effect[] {
   const spec = STATE_SPECS[ctx.state];
   if (spec.terminal) return [];
+
+  // Reachable only before AGENT_GREETED: the guard passes the moment the
+  // greeting lands, and `advance()` leaves GREETING in the same transition.
+  if (ctx.state === "GREETING") return [{ type: "GREET" }];
 
   if (ctx.state === "CONFIRM") {
     const pending = ctx.slots.pendingConfirmations();

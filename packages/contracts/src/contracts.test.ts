@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   CALL_STATES,
   CRITICAL_ASR_SLOTS,
+  EFFECT_TYPES,
   EMERGENCY_INTERRUPTIBLE_STATES,
   E164Schema,
+  EffectSchema,
   HAZARD_ACTIONS,
   HAZARD_CATEGORIES,
   LOW_CONFIDENCE_THRESHOLD,
@@ -13,6 +15,7 @@ import {
   STATE_SPECS,
   TimeWindowSchema,
   type CallState,
+  type Effect,
 } from "./index.js";
 
 describe("slot registry", () => {
@@ -260,5 +263,54 @@ describe("PendingBookingPayload", () => {
       address: { ...valid.address, lat: 25.7651, lng: -80.2197 },
     });
     expect(parsed.address.lat).toBeCloseTo(25.7651);
+  });
+});
+
+/**
+ * `Effect` crosses two boundaries: into `Utterer`, and — at Step 4.1 — into the
+ * Python worker as generated Pydantic. Both need it parsed, not just typed.
+ */
+describe("effects", () => {
+  const EVERY_EFFECT: readonly Effect[] = [
+    { type: "GREET" },
+    { type: "ASK_FOR", key: "caller_name" },
+    { type: "READ_BACK", key: "service_address" },
+    {
+      type: "ESCALATE",
+      reason: "EMERGENCY_HAZARD",
+      action: "DIAL_911_GUIDANCE",
+      hazard: {
+        category: "GAS_LEAK",
+        action: "DIAL_911_GUIDANCE",
+        matchedText: "smells like gas",
+        ruleId: "gas.smell_verb+gas_noun",
+      },
+    },
+    { type: "CREATE_PENDING_BOOKING" },
+  ];
+
+  it("parses one of every effect the machine can emit", () => {
+    for (const effect of EVERY_EFFECT) {
+      expect(EffectSchema.safeParse(effect).success).toBe(true);
+    }
+    expect(EVERY_EFFECT.map((e) => e.type).sort()).toEqual([...EFFECT_TYPES].sort());
+  });
+
+  it("rejects an effect type the voice runtime would not know how to perform", () => {
+    expect(EffectSchema.safeParse({ type: "HANG_UP" }).success).toBe(false);
+  });
+
+  it("requires an escalation to say whether a hazard fired", () => {
+    const r = EffectSchema.safeParse({
+      type: "ESCALATE",
+      reason: "CALLER_REQUESTED_HUMAN",
+      action: "WARM_TRANSFER",
+    });
+    expect(r.success).toBe(false);
+  });
+
+  /** The AI disclosure needs an effect to ride on, or nobody ever speaks it. */
+  it("carries GREET, which is where the disclosure is spoken", () => {
+    expect(EFFECT_TYPES).toContain("GREET");
   });
 });

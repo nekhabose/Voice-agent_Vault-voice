@@ -92,11 +92,12 @@ cd apps/web && npm run build   # also typechecks the app
 
 ```
 packages/
-  contracts/     Zod schemas. The spine. Slots, states, bookings, traces, ports.
+  contracts/     Zod schemas. The spine. Slots, states, effects, bookings, traces, ports.
   conversation/  SlotBook + the state machine. Pure, no I/O.
   safety/        Deterministic emergency classifier. No LLM dependency.
   validators/    Phone, address (geocoder port), service area, business hours.
   extraction/    The Anthropic slot extractor. One tool, one field, one turn.
+  utterance/     Everything the agent says. Committed catalog, decided before the call.
   crm/           CrmAdapter interface + Housecall Pro + Jobber. Writes and reads.
   workflows/     Saga engine + post-call booking transaction + the outcome poller.
   telemetry/     Reliability metrics + latency/turn-taking budgets.
@@ -113,13 +114,21 @@ contracts ──► conversation ──► validators ──► eval
     │              │               ▲            ▲
     ├──► safety ───┼───────────────┘────────────┘
     ├──► extraction ─────────────────────────────┘  (eval binds it at Step 5.1)
+    ├──► utterance ──────────────────────────────┘  (eval binds it at Step 4)
     ├──► crm ──► workflows ┄┄► telemetry            (┄ = test-only)
     ├──► telemetry ──► web
     └──► db
 ```
 
 `extraction` depends on `contracts` alone, and nothing depends on `extraction` yet. The only
-model SDK in the tree lives there, and it stays there.
+model SDK in the tree lives there, and it stays there. `utterance` also depends on `contracts`
+alone — `LlmUtterer` reaches a model through a local `Phraser` port rather than importing the
+SDK, which is what keeps that sentence true.
+
+`Effect` and `EscalationAction` live in `contracts`, not `conversation`. Two things need them
+across a boundary: the `Utterer` port (which `contracts` owns), and the Python worker, whose
+Pydantic is generated from the Zod here at task 4.1. `machine.ts` re-exports them because it
+is where they are produced.
 
 `db` depends on `contracts` alone, and nothing depends on `db`. Every `pgEnum` is spread
 from a Zod schema rather than retyped, so the tables cannot drift from the domain.
@@ -145,10 +154,15 @@ change, not a refactor.
 slots is present and validated, and guards pass. `transition()` is a pure
 function: same context and event in, same result out.
 
-It returns `Effect[]` — `ASK_FOR`, `READ_BACK`, `ESCALATE`,
+It returns `Effect[]` — `GREET`, `ASK_FOR`, `READ_BACK`, `ESCALATE`,
 `CREATE_PENDING_BOOKING` — which the voice runtime performs. The machine decides;
 the audio layer is dumb. This is what makes the entire graph testable without a
 phone.
+
+A call opens with **no event at all**, so `nextPrompt(ctx)` is exported: the worker
+asks the machine what to say first and is told to `GREET`. Delete that and
+`greeting_delivered` blocks the call forever, waiting on a milestone nobody was
+asked to reach — and no caller ever hears the AI disclosure.
 
 `packages/extraction` enforces the other half in the tool schema rather than in a
 prompt: one tool, forced `tool_choice`, `disable_parallel_tool_use`. The model's
@@ -204,6 +218,23 @@ And `strict: true` guarantees the *shape*, never the *meaning* — it cannot car
 `pattern` or `minLength`, so a ZIP of `ABCDE` comes straight back. Re-validating
 the model's output with the Zod schema on the way in is the only thing standing
 between the model and the geocoder.
+
+**No model speaks a sentence whose content is load-bearing.** `packages/utterance`
+holds a committed catalog, and `LlmUtterer` — a development drafting tool, never
+what ships — may paraphrase `ASK_FOR` and nothing else. The other four effects
+each carry content, not wording:
+
+- `GREET` carries the AI disclosure. Legal text. Pinned character-for-character.
+- `READ_BACK` **is** the verification step. A model that "naturally" renders
+  `1247 Calle Ocho` as `1247 SW 8th St` earns a cheerful yes to an address the
+  caller never gave, and books a truck to it. Interpolating a value is
+  templating, not generation — `fill()` does it, and it is nine lines.
+- `ESCALATE` carries life-safety guidance, read to someone who may be standing in
+  a room filling with gas.
+- `CREATE_PENDING_BOOKING` promises an SMS to one specific number.
+
+Widening that check in `llm.ts` fails three tests. `plan.md` §10.2 originally said
+the opposite; it was wrong, and Step 3 surprise #3 says why.
 
 ### 4. The emergency classifier does not ask an LLM for permission
 
@@ -299,12 +330,13 @@ does not compile.
 
 ## Testing
 
-526 tests, 98.99% line coverage, thresholds enforced in `vitest.config.ts`.
+575 tests, 99.08% line coverage, thresholds enforced in `vitest.config.ts`.
 
 | Layer | Where | What it proves |
 |---|---|---|
-| Schema invariants | `contracts` | The graph is connected, terminal states have no successor, every slot has both a spec and an extraction schema |
+| Schema invariants | `contracts` | The graph is connected, terminal states have no successor, every slot has both a spec and an extraction schema, every `Effect` parses |
 | Unit | `conversation`, `safety`, `validators` | Slot mechanics, hazard precision/recall, phone/address/window rules |
+| Review surface | `utterance` | The catalog is data, not template functions; every slot has an ask and a read-back; the AI disclosure is byte-for-byte what it was; `LlmUtterer` refuses to reword anything but `ASK_FOR` |
 | Replay | `extraction` | Committed model responses driven through the **real** `SLOT_SPECS`. **Zero live model calls** — the SDK's `fetch` is injected. A suite whose green depends on a third party's uptime teaches the team to ignore red |
 | Contract | `crm` | **One suite, both adapters.** If it passes for Housecall Pro and Jobber, the interface is not a rename of one vendor's endpoints. `readJob` is asserted in our vocabulary against each vendor's |
 | Drift | `db` | Every `pgEnum` equals its Zod source. No database is touched; that needs Neon |
@@ -317,16 +349,20 @@ does not compile.
   `readBacks` precisely because asserting the final *value* would also pass a
   system that silently kept a stale confirmation.
 - **Mutation-test the invariants that matter.** Break the thing, confirm the
-  suite screams, revert. Thirteen are verified: revoking confirmation on
+  suite screams, revert. Eighteen are verified: revoking confirmation on
   correction (caught in 3 places); in-phrase fuzzy matching (drops recall to
   0.974); in `extraction`, dropping `thinking: {type:"disabled"}`, skipping the
   Zod re-validation of the model's output, interpolating a per-call value into
-  the cached prompt prefix, and widening `UrgencySchema` in `contracts`; and, in
+  the cached prompt prefix, and widening `UrgencySchema` in `contracts`; in
   the outcome pipeline, swallowing a `503` in `readJob`, treating an unreported
   field as a correction, counting outcome rows instead of bookings (caught in 2
   places), reading Jobber's truncated `title` instead of `instructions`,
   comparing `postalCode` exactly, comparing phone numbers as strings, and
-  restoring `CRM_WEBHOOK` to the contract.
+  restoring `CRM_WEBHOOK` to the contract; and, in `utterance`, letting
+  `LlmUtterer` paraphrase anything beyond `ASK_FOR` (caught in 3 places),
+  rewording `AI_DISCLOSURE`, reading back the caller's raw address instead of the
+  geocoder's `formatted`, dropping the tenant timezone from `speakWindow`, and
+  removing `GREET` from `nextPrompt`.
 - The emergency classifier reports precision **and** recall over a labeled
   bilingual corpus every run (38 hazards, 28 routine calls). `recall === 1.0` is
   asserted. Precision is currently 1.0, with 3 documented deliberate false
@@ -362,6 +398,13 @@ Stated plainly, because a README that implies otherwise is marketing.
 - **No telephony, no LiveKit, no realtime model.** The `Effect[]` type is the seam
   the voice runtime binds to. The plan puts the agent worker in Python; the core
   is TypeScript and pure, so it can drive either through a typed boundary.
+- **Nothing has ever spoken an utterance out loud.** `packages/utterance` renders
+  strings; no TTS engine has read one, so the prosody of "305 555 1234" is a
+  guess. And **no lawyer has read `AI_DISCLOSURE`** — it is committed and pinned,
+  which is not the same as reviewed. That signature is Step 8's.
+- **`LlmUtterer` has no bound `Phraser`.** Nothing in the tree implements one;
+  it is a drafting tool waiting for a credential, and `CachedUtterer` is what
+  every code path actually uses.
 - **No database, only its schema.** `packages/db` is Drizzle tables and a
   generated migration — no client, no pool, no query helpers, because
   `drizzle-kit generate` needs no database and nothing else in the tree has one.
@@ -398,6 +441,14 @@ Stated plainly, because a README that implies otherwise is marketing.
 - `zonedParts` uses `Intl` rather than a date library. DST and offset history are
   already in the platform, and a bad appointment window is a truck on the wrong
   day.
+- `utterance`'s `speakWindow` and `workflows`' `formatWindow` are **not**
+  duplicates to be merged. The SMS reads `2:00 PM – 6:00 PM`; spoken aloud, an en
+  dash is a silence and `2:00` is "two oh oh". Same input, two audiences. Both
+  defer DST to `Intl`, so there is no logic to keep in sync.
+- `packages/utterance/src/catalog.ts` is **data**. A test walks it and fails on any
+  leaf that is not a string, or any `{placeholder}` outside `PLACEHOLDERS`. Adding
+  a template function there is how the human review in Step 3.3 stops being a
+  review — a reader of functions has to simulate them to know what a caller hears.
 - `packages/db` enums are spread from Zod with a `variants()` helper, because
   `z.enum(...).options` is a *readonly* tuple and `pgEnum` wants a mutable one.
   Widen `Object.values(schema)` to `unknown[]` before drizzle's `is(v, PgTable)`
@@ -412,6 +463,35 @@ Stated plainly, because a README that implies otherwise is marketing.
 ---
 
 ## Change log
+
+- **Step 3 — `packages/utterance`.** *(575 tests, 99.08% coverage, typecheck clean,
+  `apps/web` builds.)* Everything the agent says, decided before the call: a committed
+  catalog of ~40 strings behind the new `Utterer` port, `CachedUtterer` (ships, no I/O),
+  `LlmUtterer` (a drafting tool), and `TemplateUtterer` / `FakePhraser`.
+
+  **Two boundaries moved.** `Effect` and `EscalationAction` left `conversation` for
+  `contracts/src/effects.ts`, as Zod: `Utterer.say(effect, ctx)` needs them and `contracts`
+  cannot import `conversation`. That turned out to be their right home anyway — task 4.1
+  generates the worker's Pydantic from them. And the `Effect` union gained a fifth variant,
+  `GREET`, because GREETING requires no slots, so the machine emitted nothing there and **the
+  AI disclosure had nowhere to be spoken.** `nextPrompt(ctx)` is exported for the same reason:
+  a call opens with no event, and the worker has to be able to ask what to say first.
+
+  **The surprise was that `plan.md` §10.2 was wrong, and wrong in the direction of
+  principle #3.** It said `LlmUtterer` exists "for read-back phrasings that interpolate a
+  value." Interpolating a value is templating; asking a model to do it is how `1247 Calle
+  Ocho` becomes `1247 SW 8th St` and the caller confirms an address they never gave. The
+  read-back *is* the verification step. `LlmUtterer` now paraphrases `ASK_FOR` and nothing
+  else — the disclosure is legal text, `ESCALATE` is read to someone standing in gas, and the
+  closing promises an SMS to one number.
+
+  **The catalog is pure data, and that is the point.** No template functions, no
+  concatenation; `fill()` resolves `{business}`, `{value}`, `{phone}`. `git diff catalog.ts`
+  is the change-control surface for what a stranger hears when they phone a plumber at
+  midnight, and a reviewer of template *functions* would have to simulate them.
+
+  **Unverified, and named:** no TTS has spoken any of it, and no lawyer has read
+  `AI_DISCLOSURE`. Committed and pinned is not reviewed. Step 8.
 
 - **Step 2 — `CrmAdapter.readJob` + the outcome pipeline.** *(526 tests, 98.99% coverage,
   typecheck clean, `apps/web` builds.)* The wedge, made computable. `readJob` on both
