@@ -41,6 +41,42 @@ describe("slot registry", () => {
       expect(SLOT_SPECS[key].confirmation).toBe("always");
     }
   });
+
+  it("gives every slot an extraction schema", () => {
+    // `packages/extraction` derives the model's tool schema from this. A slot
+    // without one has no defined output space for the model.
+    for (const key of SLOT_KEYS) {
+      expect(SLOT_SPECS[key].extraction).toBeDefined();
+    }
+  });
+
+  it("never lets the model produce a geocoder-owned or validator-owned value", () => {
+    // The extraction schema is deliberately narrower than the storage schema.
+    // These two assertions are the boundary; widening either hands the model a
+    // job that `packages/validators` is supposed to do (principle #3).
+    expect(SLOT_SPECS.service_address.extraction.safeParse({
+      line1: "1 Main St",
+      city: "Austin",
+      state: "TX",
+      postalCode: "78704",
+      formatted: "hallucinated",
+      lat: 30.2,
+      lng: -97.7,
+    }).success).toBe(true);
+    expect(
+      SLOT_SPECS.service_address.extraction.parse({
+        line1: "1 Main St",
+        city: "Austin",
+        state: "TX",
+        postalCode: "78704",
+        formatted: "hallucinated",
+      }),
+    ).not.toHaveProperty("formatted");
+
+    // Spoken digits, not E.164 — `validatePhone` owns the normalisation.
+    expect(SLOT_SPECS.callback_phone.extraction.safeParse("305 555 0142").success).toBe(true);
+    expect(SLOT_SPECS.callback_phone.schema.safeParse("305 555 0142").success).toBe(false);
+  });
 });
 
 describe("state graph", () => {

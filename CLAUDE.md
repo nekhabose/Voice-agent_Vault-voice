@@ -96,6 +96,7 @@ packages/
   conversation/  SlotBook + the state machine. Pure, no I/O.
   safety/        Deterministic emergency classifier. No LLM dependency.
   validators/    Phone, address (geocoder port), service area, business hours.
+  extraction/    The Anthropic slot extractor. One tool, one field, one turn.
   crm/           CrmAdapter interface + Housecall Pro + Jobber.
   workflows/     Saga engine + post-call booking transaction.
   telemetry/     Reliability metrics + latency/turn-taking budgets.
@@ -110,9 +111,13 @@ apps/
 contracts ──► conversation ──► validators ──► eval
     │              │               ▲            ▲
     ├──► safety ───┼───────────────┘────────────┘
+    ├──► extraction ─────────────────────────────┘  (eval binds it at Step 5.1)
     ├──► crm ──► workflows
     └──► telemetry ──► web
 ```
+
+`extraction` depends on `contracts` alone, and nothing depends on `extraction` yet. The only
+model SDK in the tree lives there, and it stays there.
 
 `contracts` depends on nothing. Nothing depends on `web`. There are no cycles —
 keep it that way.
@@ -134,6 +139,12 @@ It returns `Effect[]` — `ASK_FOR`, `READ_BACK`, `ESCALATE`,
 `CREATE_PENDING_BOOKING` — which the voice runtime performs. The machine decides;
 the audio layer is dumb. This is what makes the entire graph testable without a
 phone.
+
+`packages/extraction` enforces the other half in the tool schema rather than in a
+prompt: one tool, forced `tool_choice`, `disable_parallel_tool_use`. The model's
+entire decision space per turn is *what is the value of this one field, or
+nothing* — and `null` is the "or nothing", because a forced `tool_choice` leaves
+it no other way to decline.
 
 ### 2. Out-of-order fills and backtracking are day-one requirements
 
@@ -160,6 +171,29 @@ wrong door.
 A geocoder outage yields `unavailable`, not `invalid`. Unverified is not wrong,
 and an outage at Google must not take the contractor's phone line down. The
 `always`-confirm policy is what protects us in that window.
+`ExtractionOutcome` mirrors this exactly: an Anthropic outage is `unavailable`,
+never `absent`, because "the model is down" and "the caller said nothing" must
+not produce the same behaviour.
+
+**The model's output space is the contract, narrowed.** `SLOT_SPECS[key]` carries
+*two* schemas. `.schema` is the stored fact; `.extraction` is what the model may
+report, and `packages/extraction` derives its strict tool schema from the latter.
+They differ for exactly two slots, and both differences are this principle:
+
+- `service_address` — `.extraction` is `AddressInputSchema`, with no `formatted`,
+  `lat`, or `lng`. Those are the *geocoder's output*. A model that can emit
+  `formatted` can hallucinate a normalised address that never existed, and the
+  read-back then reads it confidently back to the caller.
+- `callback_phone` — `.extraction` is spoken digits. `E164Schema` would make the
+  model invent a country code, which is `validatePhone`'s job.
+
+Merging them looks like a cleanup (four of six slots have identical schemas) and
+is a principle violation. Two tests in `contracts.test.ts` fail if you try.
+
+And `strict: true` guarantees the *shape*, never the *meaning* — it cannot carry
+`pattern` or `minLength`, so a ZIP of `ABCDE` comes straight back. Re-validating
+the model's output with the Zod schema on the way in is the only thing standing
+between the model and the geocoder.
 
 ### 4. The emergency classifier does not ask an LLM for permission
 
@@ -216,7 +250,15 @@ publishes it.
   new values. A call's history is a list of snapshots, not a blob to reconstruct
   from logs.
 - **Result types over exceptions** for expected failures (`FillResult`,
-  `Validation<T>`). Exceptions are for genuinely exceptional things.
+  `Validation<T>`, `ExtractionOutcome`). Exceptions are for genuinely exceptional
+  things — in `extraction`, a `429`/`5xx`/dead socket is `unavailable`, while a
+  `400` or `401` **throws**, because a malformed request or a missing key is our
+  bug and must crash loudly in staging rather than degrade into a caller being
+  asked their name four times.
+- **Nothing in the cached prompt prefix may vary per call.** `tools` and `system`
+  render before `messages`. One interpolated byte in the prefix multiplies
+  extraction cost roughly tenfold with no error. Per-call data goes in
+  `ExtractionContext`, which the request builder never reads.
 - Comments explain *why*, and cite the constraint. If a comment restates the
   code, delete it.
 
@@ -224,12 +266,13 @@ publishes it.
 
 ## Testing
 
-391 tests, 98.8% line coverage, thresholds enforced in `vitest.config.ts`.
+439 tests, 98.8% line coverage, thresholds enforced in `vitest.config.ts`.
 
 | Layer | Where | What it proves |
 |---|---|---|
-| Schema invariants | `contracts` | The graph is connected, terminal states have no successor, every slot has a spec |
+| Schema invariants | `contracts` | The graph is connected, terminal states have no successor, every slot has both a spec and an extraction schema |
 | Unit | `conversation`, `safety`, `validators` | Slot mechanics, hazard precision/recall, phone/address/window rules |
+| Replay | `extraction` | Committed model responses driven through the **real** `SLOT_SPECS`. **Zero live model calls** — the SDK's `fetch` is injected. A suite whose green depends on a third party's uptime teaches the team to ignore red |
 | Contract | `crm` | **One suite, both adapters.** If it passes for Housecall Pro and Jobber, the interface is not a rename of one vendor's endpoints |
 | Integration | `workflows` | The booking saga, including the forced `create_job` failure and its compensating rollback |
 | End-to-end | `eval` | Simulated callers through the real machine, classifier, and validators |
@@ -240,8 +283,11 @@ publishes it.
   `readBacks` precisely because asserting the final *value* would also pass a
   system that silently kept a stale confirmation.
 - **Mutation-test the invariants that matter.** Break the thing, confirm the
-  suite screams, revert. Two are verified: revoking confirmation on correction
-  (caught in 3 places), and in-phrase fuzzy matching (drops recall to 0.974).
+  suite screams, revert. Six are verified: revoking confirmation on correction
+  (caught in 3 places); in-phrase fuzzy matching (drops recall to 0.974); and, in
+  `extraction`, dropping `thinking: {type:"disabled"}`, skipping the Zod
+  re-validation of the model's output, interpolating a per-call value into the
+  cached prompt prefix, and widening `UrgencySchema` in `contracts`.
 - The emergency classifier reports precision **and** recall over a labeled
   bilingual corpus every run (38 hazards, 28 routine calls). `recall === 1.0` is
   asserted. Precision is currently 1.0, with 3 documented deliberate false
@@ -253,11 +299,17 @@ publishes it.
 
 Stated plainly, because a README that implies otherwise is marketing.
 
-- **No LLM is wired. Anywhere.** Zero model SDKs in the dependency tree. The slot
-  extractor is a stub — `packages/eval/src/simulate.ts:33` says so, deliberately.
-  `plan.md` §10.1 specifies the real one: strict tool use, one tool per slot,
-  schema derived from `SLOT_SPECS[key].schema` so the contract and the model's
-  output space are the same object.
+- **The extractor has never spoken to a live model.** `packages/extraction` is
+  real code against the real `@anthropic-ai/sdk`, but every test drives it through
+  an injected `fetch` and committed fixtures, and **those fixtures were
+  hand-authored, not recorded** — no credential existed when it was built
+  (`fixtures.ts` says so at the top). Re-record them at the start of Step 5.
+  Two things nobody has verified: what `claude-sonnet-5` actually emits, and
+  whether the prompt-cache prefix is even large enough to cache (it is a few
+  hundred tokens against a Sonnet-tier minimum near 2k, and a short prefix caches
+  *silently*). See `plan.md` Step 1, surprises #4 and #5.
+- **`eval` still uses its own inline extractor stub.** `FakeExtractor` exists and
+  nothing binds it yet; that is task 5.1, left undone rather than half-done.
 - **Nothing produces `BookingOutcome[]`.** `computeMetrics()` (`metrics.ts:41`)
   accepts the contractor's later edits and cancellations as ground truth, and no
   code emits them. Since that number *is* the wedge, `CrmAdapter.readJob` plus a
@@ -303,6 +355,31 @@ Stated plainly, because a README that implies otherwise is marketing.
 ---
 
 ## Change log
+
+- **Step 1 — `packages/extraction`.** *(439 tests, 98.84% coverage, typecheck clean,
+  `apps/web` builds.)* The Anthropic slot extractor, behind the new `SlotExtractor`
+  port: one tool per slot, forced `tool_choice`, `thinking: {type:"disabled"}`,
+  `max_tokens: 256`, prompt-cache pre-warm across all six prefixes. The tool schema
+  is derived from the contract at build time, and a `strictify()` pass rewrites it
+  into the subset `strict: true` accepts.
+
+  **Two boundaries moved, and both are principle #3.** First, `SlotSpec` gained an
+  `extraction` schema beside `schema`, because deriving the model's tool from the
+  *storage* schema would ask it for `formatted`/`lat`/`lng` (the geocoder's output)
+  and for E.164 (the validator's output). `AddressInputSchema` moved into
+  `contracts` from `validators`, where it had been duplicated. Second, `strict` mode
+  cannot express `pattern` or `minLength`, so the contract's semantic constraints
+  are enforced by Zod on the way *in* rather than by the model on the way out — a
+  ZIP of `ABCDE` satisfies the tool schema and is rejected by `AddressInputSchema`,
+  and the `SERVICE_ADDRESS_MALFORMED` fixture exists to keep that pass alive.
+
+  **The exit criterion changed, on purpose.** `plan.md` asked for
+  `cache_read_input_tokens > 0` in CI *and* zero live model calls in `npm test`;
+  those contradict. The suite instead asserts the rendered `tools` and `system`
+  bytes are identical across calls with different call ids, turn indices, and
+  utterances — which is the property a `Date.now()` in the prefix actually breaks,
+  and it fails offline in milliseconds. The live check is now task 5.5. Underneath
+  it sits an unverified assumption: our prefix may be too short to cache at all.
 
 - **Step 0 — pivot cleanup.** *(391 tests, 98.82% coverage, `apps/web` builds.)*
   `confirmationBody()` and `formatWindow()` no longer take a `Locale`: the

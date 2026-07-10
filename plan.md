@@ -8,26 +8,28 @@
 
 ---
 
-## Current status (verified 2026-07-09, after Step 0)
+## Current status (verified 2026-07-09, after Step 1)
 
 The domain core is built and green. Everything below was re-run, not copied from a previous claim.
 
 | Check | Result |
 |---|---|
-| `npm test` | **391 passed**, 10 files |
+| `npm test` | **439 passed**, 11 files |
 | `npm run typecheck` | clean |
-| `npm run test:coverage` | **98.82%** lines (thresholds: 90/90/85/90) |
+| `npm run test:coverage` | **98.84%** lines (thresholds: 90/90/85/90) |
 | `cd apps/web && npm run build` | builds, 3 routes |
 
 **Built.** `contracts`, `conversation` (SlotBook + the seven-state machine), `safety`
-(deterministic classifier, labeled corpus, `recall === 1.0`), `validators`, `crm`
+(deterministic classifier, labeled corpus, `recall === 1.0`), `validators`, `extraction`
+(the Anthropic slot extractor behind the `SlotExtractor` port), `crm`
 (Housecall Pro + Jobber behind one contract suite), `workflows` (saga + compensating
 rollback), `telemetry` (Full-Duplex-Bench-comparable definitions + CI budgets), `eval`
 (simulated callers), `apps/web` (dashboard).
 
-**Not built.** No LLM is wired anywhere — there is no model SDK in the dependency tree.
-No telephony, no realtime model, no database, no auth, no billing, no compliance work.
-The slot extractor is a stub (`packages/eval/src/simulate.ts:33` says so, deliberately).
+**Not built.** No telephony, no realtime model, no database, no auth, no billing, no
+compliance work. `AnthropicExtractor` exists but has never spoken to a live model — it is
+tested entirely against committed fixtures, and `packages/eval/src/simulate.ts` still binds
+its own inline stub rather than the real extractor (Step 5.1).
 `computeMetrics()` accepts a `BookingOutcome[]` that nothing currently produces.
 
 ### Progress board
@@ -39,8 +41,8 @@ person to open this file will trust it, and be wrong.
 | Step | What | Status |
 |---|---|---|
 | 0 | Pivot cleanup | ✅ **Done** — 2026-07-09 |
-| 1 | `packages/extraction` — the LLM slot extractor | ⬜ Not started ← **next** |
-| 2 | `CrmAdapter.readJob` + the outcome pipeline | ⬜ Not started |
+| 1 | `packages/extraction` — the LLM slot extractor | ✅ **Done** — 2026-07-09 |
+| 2 | `CrmAdapter.readJob` + the outcome pipeline | ⬜ Not started ← **next** |
 | 3 | Utterance generation (build time) | ⬜ Not started |
 | 4 | `apps/agent` — one live call | ⬜ Not started |
 | 5 | Eval over the real path | ⬜ Not started |
@@ -52,8 +54,9 @@ person to open this file will trust it, and be wrong.
 Not on the critical path, and unresolved: the `AgenticArm` A/B (§11), and
 `claude-haiku-4-5` vs `claude-sonnet-5` for extraction, scored on critical-slot accuracy.
 
-Step 1 (§9) starts from a working, tested, wedge-agnostic core. That is the whole point of
-having built it before choosing the wedge.
+**Two questions Step 1 could not settle without a credential, and Step 5 must:** whether the
+prompt-cache prefix is even large enough to cache (§10.1), and whether the committed fixtures
+match what `claude-sonnet-5` actually returns. Both are called out in Step 1's notes below.
 
 ---
 
@@ -258,7 +261,7 @@ ledgerline/
 │   ├── conversation/           SlotBook + state machine. Pure, no I/O.
 │   ├── safety/                 Emergency classifier (no LLM dependency)
 │   ├── validators/             Phone, address, service area, business hours
-│   ├── extraction/             LLM slot extractor behind SlotExtractor port        [Step 1]
+│   ├── extraction/             LLM slot extractor behind SlotExtractor port        ✅
 │   ├── crm/                    CrmAdapter + Housecall Pro + Jobber
 │   ├── workflows/              Saga engine + post-call booking transaction
 │   ├── telemetry/              Reliability metrics + latency budgets
@@ -415,24 +418,96 @@ shows only these:
 
 ---
 
-### Step 1 — `packages/extraction` (3–4 days, no telephony needed)
+### Step 1 — `packages/extraction` ✅ **Done (2026-07-09)**
 
-The highest-value integration in the project, and it needs nothing but the contracts. Build it
+The highest-value integration in the project, and it needs nothing but the contracts. Built
 first so the risk is retired before any hardware is involved.
 
-| # | Task | Detail |
-|---|---|---|
-| 1.1 | Add the `SlotExtractor` port + `ExtractionOutcome` | `packages/contracts/src/ports.ts`. See §10.3. The `unavailable` variant is not optional. |
-| 1.2 | Scaffold `packages/extraction` | Depends on `contracts` only. Add to `transpilePackages`. |
-| 1.3 | `toolFor(key)` — derive the tool schema from `SLOT_SPECS[key].schema` | §10.1. `zodToJsonSchema` + `strict: true` + `additionalProperties: false`. |
-| 1.4 | `AnthropicExtractor implements SlotExtractor` | One tool, forced `tool_choice`, `thinking: {type:"disabled"}`, `max_tokens: 256`. Re-validate the result with the Zod schema on the way in. |
-| 1.5 | Record real responses → fixtures | One per slot, plus: absent, ambiguous, low-confidence, malformed. Commit them. |
-| 1.6 | Replay tests against the **real** `SLOT_SPECS` | Proves a contract change breaks the extractor at build time. |
-| 1.7 | Prompt-cache pre-warm + CI assertion | §10.1. Assert `cache_read_input_tokens > 0` on the second request. |
-| 1.8 | `FakeExtractor` | Scripted per key. `eval` binds to this. |
+| # | Task | Detail | |
+|---|---|---|---|
+| 1.1 | Add the `SlotExtractor` port + `ExtractionOutcome` | `contracts/src/ports.ts`. `unavailable` carries a `reason`. | ✅ |
+| 1.2 | Scaffold `packages/extraction` | Depends on `contracts` only. **Not** added to `transpilePackages` — `apps/web` does not import it, and an unused entry is a lie about the dependency graph. | ✅ |
+| 1.3 | `toolFor(key)` — derive the tool schema from the contract | Derived from the new `SLOT_SPECS[key].extraction`, **not** `.schema`. See surprise #1. | ✅ |
+| 1.4 | `AnthropicExtractor implements SlotExtractor` | One tool, forced `tool_choice` with `disable_parallel_tool_use`, `thinking: {type:"disabled"}`, `max_tokens: 256`. Zod re-validates on the way in. | ✅ |
+| 1.5 | Fixtures: one per slot, plus absent / ambiguous / low-confidence / malformed | Committed in `fixtures.ts`. **Hand-authored, not recorded** — see surprise #5. | ✅ |
+| 1.6 | Replay tests against the **real** `SLOT_SPECS` | Mutation-tested: adding an `Urgency` variant fails the extraction suite. | ✅ |
+| 1.7 | Prompt-cache pre-warm + CI assertion | `prewarm()` warms all six prefixes. The CI assertion changed — see surprise #4. | ✅ |
+| 1.8 | `FakeExtractor` | Scripted per key, records what it was asked. `eval` binds to it in Step 5.1. | ✅ |
 
-**Exit:** replay suite green, `cache_read_input_tokens > 0` asserted, `thinking.type ===
-"disabled"` asserted on the outgoing request body, zero live model calls in `npm test`.
+**Exit (met).** Replay suite green, `thinking.type === "disabled"` asserted on the outgoing
+request body, zero live model calls in `npm test` (no credential is read anywhere; the SDK's
+`fetch` is injected). `cache_read_input_tokens` is surfaced and asserted against fixtures;
+the *live* assertion moved to Step 5 — surprise #4.
+
+**Result:** 439 tests (was 391), 98.84% coverage, typecheck clean, `apps/web` builds.
+
+**Mutation-tested, all four caught:** dropping `thinking: {type:"disabled"}`; trusting
+`strict` and skipping the Zod re-validation; interpolating a per-call value into the cached
+prefix; widening `UrgencySchema` in `contracts`.
+
+#### Five things came out different from what this Step predicted
+
+1. **The extraction surface must be *narrower* than the storage surface, so §10.1's
+   `zodToJsonSchema(SLOT_SPECS[key].schema)` is not just awkward — it violates principle #3.**
+   `AddressSchema` carries `formatted`, `lat`, and `lng`, which are the *geocoder's output*. A
+   model handed that schema can hallucinate a normalised address that never existed, and every
+   read-back then quotes it confidently back to the caller. Likewise `E164Schema` asks the model
+   to invent a country code, which is `validatePhone`'s job. So `SlotSpec` gained an
+   `extraction` schema alongside `schema`, and `contracts` gained `AddressInputSchema` (the
+   pre-geocode shape, previously duplicated inside `validators`). Two contract tests pin the
+   boundary. **This is the single most load-bearing change in Step 1**: deriving the tool from
+   the storage schema would have handed the model three jobs that belong to our own code.
+
+2. **Four of the six slot schemas are not JSON objects, and strict tool use requires an object
+   root.** `caller_name`, `callback_phone`, `problem_description`, and `urgency` are scalars.
+   §10.1's `{...zodToJsonSchema(schema), additionalProperties: false}` produces an invalid tool
+   for all four. The real tool wraps every slot in `{value, confidence}` — which the plan already
+   required for `confidence`, but never reconciled with the spread.
+
+3. **`strict: true` accepts neither optional keys nor semantic constraints, and this is a
+   feature.** It rejects `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`; it has no
+   notion of an optional property. `strictify()` therefore drops those keywords and rewrites
+   optionals as nullable-and-required, and `stripNulls()` undoes the round trip before Zod sees
+   the value. The consequence is the interesting part: **`strict` guarantees the shape and the
+   contract guarantees the meaning.** A ZIP of `ABCDE` satisfies `{type: "string"}` and reaches
+   us; `AddressInputSchema` is the only thing that stops it from reaching the geocoder. The
+   `SERVICE_ADDRESS_MALFORMED` fixture exists to keep that second pass alive.
+
+4. **`cache_read_input_tokens > 0` cannot be asserted in `npm test`,** because doing so requires
+   a live model call and the same Exit line forbids exactly that. The contradiction was in the
+   plan. What replaced it is *better*, not weaker: the suite asserts that the rendered `tools`
+   and `system` blocks are **byte-identical across two calls with different call ids, turn
+   indices, and utterances**, which is the property a `Date.now()` in the prefix would actually
+   break — and it fails deterministically, offline, in 3ms. Usage is surfaced through an
+   `onUsage` hook so a cold cache is visible on a dashboard from day one. The live
+   `cache_read_input_tokens > 0` check belongs to the nightly arm; it is task **5.5** now.
+
+   **And a worse problem underneath it, which nobody has verified:** the minimum cacheable
+   prefix is model-dependent and is roughly 2k tokens on the Sonnet tier. Our system prompt plus
+   one tool is a few *hundred*. **The cache may silently never hit at all** — no error, just
+   `cache_creation_input_tokens: 0`. §10.5's "extraction is a rounding error *provided the cache
+   hits*" is therefore an unverified assumption, not a budget. Task 5.5 measures it before anyone
+   quotes the cost model.
+
+5. **The fixtures are hand-authored, not recorded.** No Anthropic credential existed when this
+   Step was built. They are wire-shaped and driven through the real SDK, the real tool schema,
+   and the real Zod contracts, so they still prove a contract change breaks the extractor — but
+   they prove nothing about what `claude-sonnet-5` actually emits. `fixtures.ts` says so at the
+   top. Re-record them at the start of Step 5; the assertions should not need to change.
+
+**Also settled, and worth not re-litigating:**
+
+- **Ambiguity has no `ExtractionOutcome` variant, deliberately.** The tool's `null` escape is how
+  "Tuesday or Wednesday" surfaces, and a Zod-rejected value lands in the same place. `absent`
+  means *no usable value came out of this utterance*; `unavailable` means *we could not ask*. A
+  refusal or a missing `tool_use` block is `unavailable` — treating it as `absent` would burn a
+  retry and then escalate a caller who was perfectly clear.
+- **Which failures are outages and which are our bugs.** `429`, `5xx`, and a dead socket →
+  `unavailable`. `400` and `401` → **throw**. A malformed request or a missing key must crash
+  loudly in staging, not degrade into a caller being asked their name four times.
+
+**Found, deferred to Step 5:** `simulate.ts` still carries its inline extractor stub. Binding it
+to `FakeExtractor` is task 5.1 and was left there rather than half-done here.
 
 ---
 
@@ -502,10 +577,11 @@ And `computeMetrics()` reports a real `correctionRate` from those 20 calls.
 
 | # | Task | Detail |
 |---|---|---|
-| 5.1 | Replace the extractor stub in `simulate.ts:33` | Use the real `AnthropicExtractor`. |
+| 5.1 | Replace the extractor stub in `simulate.ts` | Bind `FakeExtractor` for the PR suite; `AnthropicExtractor` in the nightly arm. |
 | 5.2 | LLM-driven caller personas | `claude-opus-4-8`. Impatient, heavy accent, background TV, gives the address wrong the first time, interrupts constantly, changes their mind mid-utterance. |
 | 5.3 | Real-SIP arm, nightly | Only over SIP are barge-in and turn-take comparable to Full-Duplex-Bench-v3, which is the entire point of defining them that way. |
 | 5.4 | Turn-take regression blocks a merge | This is the discipline that keeps principle #2 from eroding as we optimize for speed. |
+| 5.5 | **Measure the prompt cache against a live model, before quoting §10.5** | Re-record the Step 1 fixtures. Assert `cache_read_input_tokens > 0` on the second request — in the nightly arm, never the PR suite. If the prefix is below the model's minimum cacheable size it caches *silently*, with no error, and §10.5's cost model is wrong by ~10×. Pad the system prompt, or accept an uncached prefix and say so. See Step 1, surprise #4. |
 
 Existing scenarios keep running against fakes — fast, deterministic, gating every PR.
 
@@ -561,36 +637,61 @@ The detail the steps above point at.
 
 ### 10.1 Slot extraction
 
-`SLOT_SPECS[key].schema` in `packages/contracts/src/slots.ts` is a `z.ZodType`. Strict tool use
-takes a JSON Schema. So the tool the model is handed is **derived from the contract, not written
-by hand.**
+*Built in Step 1. This section was rewritten after the fact; the original sketch did not
+survive contact with `strict` mode, and the ways it failed are the interesting part.*
+
+`SLOT_SPECS[key].extraction` in `packages/contracts/src/slots.ts` is a `z.ZodType`. Strict tool
+use takes a JSON Schema. So the tool the model is handed is **derived from the contract, not
+written by hand.**
+
+**Derive from `.extraction`, never from `.schema`.** They are different schemas on purpose.
+`.schema` is the *stored fact*, after our own code has checked it: an address the geocoder
+resolved, a phone number in E.164. Handing that to the model asks the model to do the
+validating, and it will happily oblige with something plausible — a `formatted` address that
+never existed, a country code it guessed. `.extraction` is the *narrower* shape the model is
+allowed to report. Widening it hands `packages/validators` work back to the model, which is
+principle #3 run in reverse.
 
 ```ts
-// packages/extraction/src/extractor.ts
-import { zodToJsonSchema } from "zod-to-json-schema";
-import { SLOT_SPECS, type SlotKey } from "@ledgerline/contracts";
-
+// packages/extraction/src/tool.ts (abridged)
 function toolFor(key: SlotKey) {
+  const spec = SLOT_SPECS[key];
   return {
     name: `record_${key}`,
-    description: SLOT_SPECS[key].label,
-    strict: true,                       // guarantees tool_use.input validates
+    description: `Record the caller's ${spec.label} ... Use null if this utterance
+                  does not state it, or states it ambiguously.`,
+    strict: true,
     input_schema: {
-      ...zodToJsonSchema(SLOT_SPECS[key].schema),
-      additionalProperties: false,      // required by strict mode
+      type: "object",                   // strict mode requires an object root, and four
+      properties: {                     // of six slot schemas are scalars
+        value: nullable(strictify(zodToJsonSchema(spec.extraction))),
+        confidence: { type: "number" },
+      },
+      required: ["value", "confidence"],
+      additionalProperties: false,
     },
   };
 }
 ```
 
-The model cannot return a shape the machine will reject. Validate with the Zod schema again on
-the way in — `strict` guarantees schema conformance, not semantic correctness.
+`strictify()` earns its keep. Strict mode rejects `minLength`, `maxLength`, `pattern`,
+`minimum`, `maximum`, and has **no notion of an optional key**. So it drops those keywords and
+rewrites every optional property as nullable-and-required; `stripNulls()` undoes the round trip
+before Zod sees the value.
+
+**Which means `strict` guarantees the shape, and the contract guarantees the meaning.** A ZIP of
+`ABCDE` satisfies `{type: "string"}` and comes straight back at you. Re-validating with the Zod
+schema on the way in is not belt-and-braces — it is the only thing standing between the model
+and the geocoder.
 
 **One tool per call.** `tools: [toolFor(key)]`, `tool_choice: { type: "tool", name: "record_" +
-key }`. The model's entire decision space is "what is the value of this one field, or nothing."
-That is principle #1 enforced by the type system rather than by a prompt.
+key, disable_parallel_tool_use: true }`. The model's entire decision space is "what is the value
+of this one field, or nothing." That is principle #1 enforced by the type system rather than by
+a prompt — and `null` is the "or nothing", because a forced `tool_choice` leaves the model no
+other way to decline.
 
-**Confidence.** The tool schema carries a `confidence: number` alongside the value.
+**Confidence.** The tool schema carries a `confidence: number` alongside the value. Strict mode
+strips the `0..1` bound (a numerical constraint), so the extractor clamps it.
 `LOW_CONFIDENCE_THRESHOLD` (0.85) already drives the `if_low_confidence` read-back policy on
 `caller_name` and `problem_description`. A self-reported confidence is a weak signal — models
 state wrong things with the same confidence as right ones. Calibrate it against the eval corpus.
@@ -618,9 +719,19 @@ constraints, both easy to get wrong:
 - `max_tokens: 0` is rejected alongside a forced `tool_choice`. Pre-warm with the tools and
   system prompt in place but **no** `tool_choice`; send `tool_choice` on real requests. Changing
   `tool_choice` invalidates only the messages tier — the tools + system cache survives.
+  Implemented as `AnthropicExtractor.prewarm()`, which swallows outages: a cold cache is a cost
+  problem, and boot-time warming must never take the phone line down.
 - The minimum cacheable prefix is model-dependent, and a prefix below it caches silently: no
   error, just `cache_creation_input_tokens: 0`. **Verify empirically** by asserting
-  `cache_read_input_tokens > 0` on the second request, in CI.
+  `cache_read_input_tokens > 0` on the second request. **This cannot live in `npm test`** — it
+  needs a live model, and the Step 1 exit criterion forbids that. It is task 5.5, in the nightly
+  arm. Our prefix is a few hundred tokens against a Sonnet-tier minimum near 2k, so the honest
+  status today is *we do not know whether this cache hits at all.*
+
+What `npm test` asserts instead, and what actually catches the bug: the rendered `tools` and
+`system` blocks are **byte-identical across two calls with different call ids, turn indices, and
+utterances**. That is the property a `Date.now()` in the prefix breaks, and it fails offline, in
+milliseconds, on the commit that introduces it — rather than a month later on a cost graph.
 
 Never interpolate a timestamp, call ID, or the caller's name into the system prompt. Those go in
 the final user turn, after the last breakpoint. A `Date.now()` in the prefix invalidates the cache
@@ -657,7 +768,7 @@ The repo's convention is ports with real fakes, never mocking frameworks. Each n
 enters through one, gets a fake in the same package, and `eval` runs against the fakes.
 
 ```ts
-// packages/contracts/src/ports.ts
+// packages/contracts/src/ports.ts  — SlotExtractor and ExtractionOutcome ship as of Step 1
 
 /** One field, one turn. Never a plan, never a sequence. */
 export interface SlotExtractor {
@@ -667,9 +778,10 @@ export interface SlotExtractor {
 
 export type ExtractionOutcome =
   | { readonly kind: "filled"; readonly raw: unknown; readonly confidence: number }
+  /** No usable value here: unsaid, ambiguous, or rejected by the contract. */
   | { readonly kind: "absent" }
   /** Model unavailable. Distinct from `absent` — an outage is not a caller error. */
-  | { readonly kind: "unavailable" };
+  | { readonly kind: "unavailable"; readonly reason: string };
 
 /** Turns an Effect into words. Backed by a build-time cache (§10.2). */
 export interface Utterer {
@@ -688,8 +800,12 @@ yields `unavailable`, not `invalid`.* An Anthropic outage must not make the mach
 caller said nothing — that would burn an extraction-failure retry and escalate a caller who was
 perfectly clear. Route `unavailable` to a filler and one bounded retry, then `ESCALATE`.
 
-New fakes: `FakeExtractor` (scripted per key), `TemplateUtterer`, `FakeVoiceSession` (records what
-it was told to say).
+New fakes: `FakeExtractor` (scripted per key — shipped, Step 1), `TemplateUtterer`,
+`FakeVoiceSession` (records what it was told to say).
+
+`ExtractionContext` carries `callId` and `turnIndex`, and exists so that per-call information has
+somewhere to go **other than the cached prompt prefix.** `AnthropicExtractor` reads neither; they
+are for tracing. That is the point — see §10.1.
 
 ### 10.4 Binding the voice runtime to `Effect[]`
 
@@ -778,12 +894,20 @@ Colocate the worker with the model provider's region, pre-warm availability duri
 accept a filler utterance rather than a silence.
 
 **Prompt caching will break silently.** One `Date.now()` in a system prompt and extraction cost
-multiplies ~10× with no error, only a latency graph nobody can explain. Assert
-`cache_read_input_tokens > 0` in CI.
+multiplies ~10× with no error, only a latency graph nobody can explain. *Guarded as of Step 1:*
+the suite asserts the rendered `tools` and `system` bytes are identical across calls, and
+`onUsage` puts `cacheReadInputTokens` where a dashboard can see it. **Still unguarded:** whether
+the prefix is large enough to cache in the first place. Task 5.5.
 
 **Adaptive thinking will be left on by accident.** Sonnet 5 enables it when `thinking` is omitted.
-Somebody will refactor the extractor, drop the field, and add seconds to every turn. Pin it in a
-test.
+Somebody will refactor the extractor, drop the field, and add seconds to every turn. *Pinned as of
+Step 1* — the test asserts `thinking.type === "disabled"` on the outgoing request body, and it was
+mutation-tested by deleting the field.
+
+**Somebody will "simplify" `SlotSpec.extraction` away**, noticing it equals `.schema` for four of
+six slots and concluding the split is redundant. It is not. For `service_address` and
+`callback_phone` it is the line between the model reporting what it heard and the model doing
+`packages/validators`' job. Two tests in `contracts.test.ts` fail if you merge them.
 
 **Codegen drift between Zod and Pydantic.** The `PendingBooking` the worker believes in diverges
 from the one the backend commits. This is the most likely source of silent production bugs. Fail
@@ -813,14 +937,13 @@ they look like dead code. They are not. See principle #4, and Step 0.5.
 ## Start here
 
 ~~Step 0 — pivot cleanup.~~ Done 2026-07-09.
+~~Step 1 — `packages/extraction`.~~ Done 2026-07-09. Read its five surprises before you touch
+the extractor; #1 and #4 changed the contracts and the exit criterion respectively.
 
-1. **Step 1 — `packages/extraction`.** ← you are here. No telephony, no accounts, no hardware.
-   It retires the single largest technical risk in the project against fixtures you can commit.
-   Read §10.1 before writing the request body; two of the three API details there will cost you
-   a day each if you find them the hard way.
-2. **Step 2 — `readJob` and the outcome pipeline.** Design it against both CRMs on paper before
-   writing either. This is the wedge; everything else is table stakes. Don't forget task 2.2b.
-3. **Step 3 — utterance generation**, then **Step 4 — telephony.**
+1. **Step 2 — `readJob` and the outcome pipeline.** ← you are here. Design it against both CRMs
+   on paper before writing either. This is the wedge; everything else is table stakes. Don't
+   forget task 2.2b.
+2. **Step 3 — utterance generation**, then **Step 4 — telephony.**
 
 Do not start with telephony. It is the most visible part and the least uncertain.
 

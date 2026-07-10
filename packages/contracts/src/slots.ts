@@ -1,11 +1,13 @@
 import { z } from "zod";
 import {
+  AddressInputSchema,
   AddressSchema,
   ConfidenceSchema,
   E164Schema,
   TimeWindowSchema,
   UrgencySchema,
   type Address,
+  type AddressInput,
   type TimeWindow,
   type Urgency,
 } from "./primitives.js";
@@ -43,6 +45,37 @@ export interface SlotValueMap {
 export type SlotValue<K extends SlotKey = SlotKey> = SlotValueMap[K];
 
 /**
+ * What the *model* is allowed to produce for a slot, which is not the same as
+ * what we store.
+ *
+ * Storage schemas describe a fact after our own code has checked it: a phone
+ * number in E.164, an address the geocoder resolved. Asking a model for those
+ * shapes asks it to do the validating, and it will happily oblige with a
+ * plausible answer. So the extraction surface is deliberately narrower — the
+ * model reports what it heard, and `packages/validators` decides what that is
+ * worth.
+ *
+ * Two slots differ from their storage schema, and both differences are the
+ * point:
+ *
+ * - `callback_phone` — spoken digits ("three oh five, five five five..."),
+ *   normalised to E.164 by `validatePhone`. A model handed {@link E164Schema}
+ *   would have to invent a country code.
+ * - `service_address` — {@link AddressInputSchema}, with no `lat`/`lng`/
+ *   `formatted`. Those come from the geocoder (principle #3).
+ */
+export interface SlotExtractionMap {
+  caller_name: string;
+  callback_phone: string;
+  service_address: AddressInput;
+  problem_description: string;
+  urgency: Urgency;
+  appointment_window: TimeWindow;
+}
+
+export type SlotExtraction<K extends SlotKey = SlotKey> = SlotExtractionMap[K];
+
+/**
  * When a slot value must be read back to the caller before it is allowed to
  * reach the contractor's CRM.
  *
@@ -58,7 +91,14 @@ export type ConfirmationPolicy = z.infer<typeof ConfirmationPolicySchema>;
 
 export interface SlotSpec<K extends SlotKey = SlotKey> {
   readonly key: K;
+  /** The stored fact, after our validators have had their say. */
   readonly schema: z.ZodType<SlotValueMap[K]>;
+  /**
+   * The shape the model may return. `packages/extraction` derives the strict
+   * tool schema from this — never from {@link SlotSpec.schema}. See
+   * {@link SlotExtractionMap} for why the two differ.
+   */
+  readonly extraction: z.ZodType<SlotExtractionMap[K]>;
   readonly confirmation: ConfirmationPolicy;
   /**
    * Counted in the critical-slot accuracy metric (plan, Phase 0) — the fields
@@ -76,10 +116,17 @@ export interface SlotSpec<K extends SlotKey = SlotKey> {
  * validators, the read-back prompts, and the eval scorer all read this — no
  * one re-lists slot names.
  */
+const CallerNameSchema = z.string().trim().min(1).max(120);
+const ProblemDescriptionSchema = z.string().trim().min(3).max(2000);
+
+/** Digits as spoken. `validatePhone` turns this into E.164, or rejects it. */
+const SpokenPhoneSchema = z.string().trim().min(1).max(40);
+
 export const SLOT_SPECS: { readonly [K in SlotKey]: SlotSpec<K> } = {
   caller_name: {
     key: "caller_name",
-    schema: z.string().trim().min(1).max(120),
+    schema: CallerNameSchema,
+    extraction: CallerNameSchema,
     confirmation: "if_low_confidence",
     criticalForAsrMetric: true,
     label: "name",
@@ -87,6 +134,7 @@ export const SLOT_SPECS: { readonly [K in SlotKey]: SlotSpec<K> } = {
   callback_phone: {
     key: "callback_phone",
     schema: E164Schema,
+    extraction: SpokenPhoneSchema,
     confirmation: "always",
     criticalForAsrMetric: false,
     label: "callback number",
@@ -94,13 +142,15 @@ export const SLOT_SPECS: { readonly [K in SlotKey]: SlotSpec<K> } = {
   service_address: {
     key: "service_address",
     schema: AddressSchema,
+    extraction: AddressInputSchema,
     confirmation: "always",
     criticalForAsrMetric: true,
     label: "service address",
   },
   problem_description: {
     key: "problem_description",
-    schema: z.string().trim().min(3).max(2000),
+    schema: ProblemDescriptionSchema,
+    extraction: ProblemDescriptionSchema,
     confirmation: "if_low_confidence",
     criticalForAsrMetric: true,
     label: "problem",
@@ -108,6 +158,7 @@ export const SLOT_SPECS: { readonly [K in SlotKey]: SlotSpec<K> } = {
   urgency: {
     key: "urgency",
     schema: UrgencySchema,
+    extraction: UrgencySchema,
     confirmation: "if_low_confidence",
     criticalForAsrMetric: true,
     label: "urgency",
@@ -115,6 +166,7 @@ export const SLOT_SPECS: { readonly [K in SlotKey]: SlotSpec<K> } = {
   appointment_window: {
     key: "appointment_window",
     schema: TimeWindowSchema,
+    extraction: TimeWindowSchema,
     confirmation: "always",
     criticalForAsrMetric: true,
     label: "appointment window",

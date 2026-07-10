@@ -1,14 +1,13 @@
-import type { Address } from "@ledgerline/contracts";
+import type { Address, AddressInput } from "@ledgerline/contracts";
 import { accepted, rejected, unverified, type Validation } from "./types.js";
 
-/** What the extractor heard, before anyone has checked it exists. */
-export interface AddressInput {
-  readonly line1: string;
-  readonly line2?: string;
-  readonly city: string;
-  readonly state: string;
-  readonly postalCode: string;
-}
+/**
+ * What the extractor heard, before anyone has checked it exists. Defined in
+ * `contracts` because `packages/extraction` derives the model's tool schema
+ * from it, and the shape the model produces and the shape the geocoder consumes
+ * must be the same object.
+ */
+export type { AddressInput };
 
 export type GeocodeOutcome =
   | { readonly kind: "resolved"; readonly address: Address }

@@ -52,6 +52,24 @@ export const AddressSchema = z.object({
 });
 export type Address = z.infer<typeof AddressSchema>;
 
+/**
+ * An address as the caller said it, before the geocoder has seen it.
+ *
+ * `lat`, `lng`, and `formatted` are absent by construction: they are the
+ * geocoder's output, and principle #3 says an address is validated against a
+ * geocoder rather than trusted from the transcript. A model that can emit
+ * `formatted` is a model that can hallucinate a normalised address which never
+ * existed, and every downstream read-back would quote it back to the caller.
+ */
+export const AddressInputSchema = z.object({
+  line1: z.string().min(1),
+  line2: z.string().optional(),
+  city: z.string().min(1),
+  state: z.string().length(2),
+  postalCode: z.string().regex(/^\d{5}(-\d{4})?$/),
+});
+export type AddressInput = z.infer<typeof AddressInputSchema>;
+
 export const TimeWindowSchema = z
   .object({
     startsAt: IsoTimestampSchema,
