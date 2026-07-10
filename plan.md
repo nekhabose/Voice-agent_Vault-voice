@@ -8,17 +8,18 @@
 
 ---
 
-## Current status (verified 2026-07-10, after Step 4's core)
+## Current status (verified 2026-07-10, after Step 5's core)
 
-The domain core is built and green, and the call runtime that binds it to a voice
-session now exists and is tested end to end without a phone. Everything below was
-re-run, not copied from a previous claim.
+The domain core is built and green, the call runtime that binds it to a voice
+session is tested end to end without a phone, and the eval harness now drives
+extraction through the *real* `SlotExtractor` port instead of a value baked into
+the scenario. Everything below was re-run, not copied from a previous claim.
 
 | Check | Result |
 |---|---|
-| `npm test` | **611 passed**, 17 files |
+| `npm test` | **616 passed**, 17 files |
 | `npm run typecheck` | clean |
-| `npm run test:coverage` | **99.18%** lines (thresholds: 90/90/85/90) |
+| `npm run test:coverage` | **99.19%** lines (thresholds: 90/90/85/90) |
 | `cd apps/web && npm run build` | builds, 3 routes |
 
 **Built.** `contracts`, `conversation` (SlotBook + the seven-state machine), `safety`
@@ -30,9 +31,9 @@ re-run, not copied from a previous claim.
 migration), `utterance` (the committed catalog + `CachedUtterer` behind the `Utterer` port),
 `runtime` (`CallRuntime` — the `Effect[]` binding, driving the machine from caller ASR through
 the extractor, classifier, and validators, tracing every turn, and posting the `PendingBooking`),
-`eval` (simulated callers), `apps/web` (dashboard). `validators` now also carries `GoogleGeocoder`
-behind the `Geocoder` port (Step 4.7), and `contracts` emits the worker's JSON Schema with a
-drift guard (Step 4.1).
+`eval` (simulated callers, now over the real `SlotExtractor` port — Step 5.1), `apps/web`
+(dashboard). `validators` now also carries `GoogleGeocoder` behind the `Geocoder` port (Step 4.7),
+and `contracts` emits the worker's JSON Schema with a drift guard (Step 4.1).
 
 **Not built.** No telephony, no realtime model, no auth, no billing, no compliance work. **The
 `Effect[]` seam is now bound and tested, but only against fakes** — `apps/agent` is an honest
@@ -40,9 +41,11 @@ Python scaffold with no LiveKit room, no SIP trunk, and no GPT-Realtime (Step 4.
 `CallRuntime` has never driven a real microphone. `GoogleGeocoder` has never spoken to a live
 Google endpoint, and the Pydantic half of the codegen has never run (no
 `datamodel-code-generator` in this environment). `AnthropicExtractor` exists but has never
-spoken to a live model — it is tested entirely against committed fixtures, and
-`packages/eval/src/simulate.ts` still binds its own inline stub rather than the real extractor
-(Step 5.1). The `db` schema has never been applied to a
+spoken to a live model — it is tested entirely against committed fixtures. The eval harness
+**now binds the real `SlotExtractor` port** (Step 5.1): the PR suite drives `FakeExtractor`
+scripted from each scenario, and the nightly arm binds `AnthropicExtractor` over the same seam —
+but that arm has still never called a live model, and re-recording the fixtures plus the live
+prompt-cache assertion is task 5.5. The `db` schema has never been applied to a
 Postgres: `drizzle-kit generate` needs no database and `migrate` does, and no Neon instance
 exists (Step 7). **`observeOutcome()` now produces the `BookingOutcome[]` that
 `computeMetrics()` consumes, but it has only ever read a `FakeTransport`** — no live
@@ -62,9 +65,9 @@ person to open this file will trust it, and be wrong.
 | 1 | `packages/extraction` — the LLM slot extractor | ✅ **Done** — 2026-07-09 |
 | 2 | `CrmAdapter.readJob` + the outcome pipeline | ✅ **Done** — 2026-07-09 |
 | 3 | Utterance generation (build time) | ✅ **Done** — 2026-07-09 |
-| 4 | `apps/agent` — one live call | 🟡 **Core built** — 2026-07-10 (live-call gate deferred: 4.2/4.6/4.10) ← **next** |
-| 5 | Eval over the real path | ⬜ Not started |
-| 6 | Correction triage + FAQ | ⬜ Not started |
+| 4 | `apps/agent` — one live call | 🟡 **Core built** — 2026-07-10 (live-call gate deferred: 4.2/4.6/4.10) |
+| 5 | Eval over the real path | 🟡 **Core built** — 2026-07-10 (nightly/SIP arms deferred: 5.2/5.3/5.5) |
+| 6 | Correction triage + FAQ | ⬜ Not started ← **next** |
 | 7 | Product — auth, tenancy, onboarding, billing | ⬜ Not started |
 | 8 | Compliance | ⬜ Not started |
 | 9 | Publish the number | ⬜ Not started |
@@ -818,17 +821,89 @@ is the property that makes "you cannot buy latency with silence" a test rather t
 
 ---
 
-### Step 5 — Eval over the real path (1.5 weeks, overlaps Step 4)
+### Step 5 — Eval over the real path 🟡 **Core built (2026-07-10); nightly/SIP arms deferred**
 
-| # | Task | Detail |
-|---|---|---|
-| 5.1 | Replace the extractor stub in `simulate.ts` | Bind `FakeExtractor` for the PR suite; `AnthropicExtractor` in the nightly arm. |
-| 5.2 | LLM-driven caller personas | `claude-opus-4-8`. Impatient, heavy accent, background TV, gives the address wrong the first time, interrupts constantly, changes their mind mid-utterance. |
-| 5.3 | Real-SIP arm, nightly | Only over SIP are barge-in and turn-take comparable to Full-Duplex-Bench-v3, which is the entire point of defining them that way. |
-| 5.4 | Turn-take regression blocks a merge | This is the discipline that keeps principle #2 from eroding as we optimize for speed. |
-| 5.5 | **Measure the prompt cache against a live model, before quoting §10.5** | Re-record the Step 1 fixtures. Assert `cache_read_input_tokens > 0` on the second request — in the nightly arm, never the PR suite. If the prefix is below the model's minimum cacheable size it caches *silently*, with no error, and §10.5's cost model is wrong by ~10×. Pad the system prompt, or accept an uncached prefix and say so. See Step 1, surprise #4. |
+The buildable half is the extraction seam, and it is exactly the task `CLAUDE.md` flagged as
+"left undone rather than half-done." The eval harness no longer bakes the extracted value into
+the scenario: a fill now *declares* which slot a turn states and *scripts the fake*, and the
+caller's utterance text flows text → `SlotExtractor` → validators → machine, the same path
+`CallRuntime` performs. The three arms that need a credential or a SIP trunk — LLM-driven
+callers, real-SIP barge-in numbers, and the live prompt-cache measurement — are named and
+deferred, exactly as Steps 1–4 deferred their live halves.
+
+| # | Task | Detail | |
+|---|---|---|---|
+| 5.1 | Bind the real `SlotExtractor` port in `simulate.ts` | `deps.makeExtractor(scenario)` — the PR suite binds `FakeExtractor` scripted from the scenario's fills (`extractors.ts`, `scriptFromScenario`); the nightly arm binds `AnthropicExtractor` over the same seam, proven offline through an injected `fetch` (zero live calls). The outage-retry-then-`AGENT_ERROR` policy now mirrors `CallRuntime` on both sides of the port — surprise #3. | ✅ |
+| 5.2 | LLM-driven caller personas | `claude-opus-4-8`. Impatient, heavy accent, background TV, gives the address wrong the first time, interrupts, changes their mind. The 13 committed scenarios *are* the scripted-persona arm; the LLM-driven caller needs a credential this environment does not have. Deferred, named — surprise #5. | ⬜ |
+| 5.3 | Real-SIP arm, nightly | Only over SIP are barge-in and turn-take comparable to Full-Duplex-Bench-v3. No SIP trunk here. Deferred, named. | ⬜ |
+| 5.4 | Turn-take regression blocks a merge | Already enforced — but in `runtime.test.ts`, not here: `CallRuntime` traces real `SpeechOutcome`s and `checkBudgets()` breaches `turnTakeRate` on a scripted silent turn (Step 4.9). The text-driven eval has no latency model, so its turn-take number is the SIP arm's — surprise #4. | 🟡 |
+| 5.5 | **Measure the prompt cache against a live model, before quoting §10.5** | Re-record the Step 1 fixtures. Assert `cache_read_input_tokens > 0` on the second request — in the nightly arm, never the PR suite. `anthropicExtractor(client, onUsage)` already surfaces the hook where this assertion lands. If the prefix is below the model's minimum cacheable size it caches *silently*, and §10.5's cost model is wrong by ~10×. See Step 1, surprise #4. | ⬜ |
 
 Existing scenarios keep running against fakes — fast, deterministic, gating every PR.
+
+**Exit (partially met, and the gap is named).** The eval scores critical-slot accuracy and
+containment over 13 scenarios driven through the *real* `SlotExtractor` port — but in the PR
+arm that port is `FakeExtractor`, so the number proves the port, the validators, and the machine
+carry values through intact, **not** that `claude-sonnet-5` heard them right. The nightly arm
+that would prove the latter is bound and typed and driven offline; it has never called a live
+model. That is task 5.5, where the credential first exists — the same precedent Steps 1–4 set.
+
+**Result:** 616 tests (was 611), 99.19% coverage, typecheck clean, `apps/web` builds. The +5 are
+all in `packages/eval`: the port is exercised (the collaborator saw the right slot and utterance),
+a corrected slot is re-extracted from the correction utterance, an outage retries once and then
+escalates as `AGENT_ERROR`, a transient outage recovers on the retry, and the nightly
+`AnthropicExtractor` binding is driven end to end through an injected `fetch`.
+
+#### Five things came out different from what this Step predicted
+
+1. **There was no "extractor stub" to replace — the stub was the scenario.** 5.1 said "replace
+   the extractor stub in `simulate.ts`," but `toEvent` read the value straight out of `fill.raw`;
+   there was no extractor object at all. So the real change was to make a fill *declare* a slot and
+   *script the fake*, and to route the turn's text through `deps.makeExtractor(scenario).extract(...)`.
+   The value now takes the production path — text → port → validators → machine — instead of
+   scenario → machine. This is the whole point of the step: without the port, the eval can never
+   run against the real model.
+
+2. **The extractor is built per-scenario, not per-run, so it is a factory.** The PR fake is
+   scripted from *that scenario's* fills, which means it cannot be one shared instance on
+   `SimulationDeps`. `makeExtractor: (scenario) => SlotExtractor` is the one interface change; the
+   nightly arm ignores the argument and returns a single `AnthropicExtractor`, because there the
+   model — not the script — produces the value.
+
+3. **The outage-retry policy is now asserted on both sides of the port, deliberately.**
+   `extractAndBuild` retries an `unavailable` outcome once and then drives `AGENT_ERROR`, exactly
+   as `CallRuntime.extractAndApply` does. The gotchas already said `simulate.ts`'s validator
+   dispatch and `runtime`'s `validateSlot` are "not duplicates to merge"; the retry policy is now a
+   third such deliberate twin. It is the same contract on the two sides of the seam, and a suite
+   that let one drift from the other would be lying about what the runtime does.
+
+4. **5.4's turn-take gate already lives in `runtime.test.ts`, and that is correct.** The
+   text-driven eval has no latency model — every turn is instantaneous — so a turn-take number
+   computed here would be a fiction. The layer that actually spoke is the one that knows whether it
+   spoke, so `CallRuntime` traces the `SpeechOutcome`s and `checkBudgets()` breaches `turnTakeRate`
+   on a scripted silent turn (Step 4.9). The eval's turn-take arm is the real-SIP arm (5.3),
+   because only over SIP is the number comparable to the literature.
+
+5. **The nightly arm is provable *offline*, so the seam ships proven rather than merely typed.**
+   "AnthropicExtractor in the nightly arm" reads like it needs a key, but the *binding* does not:
+   inject the SDK's `fetch`, answer with a committed `tool_use` body, and the eval harness drives
+   the real extractor end to end — the cached request it builds, the block it interprets, the value
+   through the validators and the machine. Only the *live model* — re-recording fixtures and
+   asserting the cache actually hits — needs a credential, and that was already task 5.5. Same
+   split as Step 1's hand-authored fixtures.
+
+**Also settled, and worth not re-litigating:**
+
+- **A fill's `raw` is the fake's script, never a shortcut around the port.** Every fill is now
+  extracted; the garbage-phone scenario returns `filled("call me maybe")` and the *validator*
+  rejects it, exactly as a real extractor's output would be rejected. Nothing reaches the machine
+  without crossing the port and the validators.
+- **`eval` now depends on `@ledgerline/extraction` at runtime**, which the dependency diagram
+  always anticipated ("eval binds it at Step 5.1"). `FakeExtractor` and the `AnthropicExtractor`
+  binding both live behind that edge; `@anthropic-ai/sdk` rides in transitively and is declared.
+- **Confirmations stay declarative.** A caller's yes/no to a read-back is not a slot value, so
+  `confirms`/`confirmsAll` do not route through the extractor — only fills do. That matches the
+  machine's event set and keeps the harness honest about what the port is for.
 
 ---
 
@@ -1023,7 +1098,9 @@ tool for development, and it may paraphrase **`ASK_FOR` and nothing else**:
 | `CREATE_PENDING_BOOKING` | No | It promises an SMS to a specific number. |
 
 `LlmUtterer` reaches a model through a local `Phraser` port. **No model SDK lives in
-`packages/utterance`** — the only `@anthropic-ai/sdk` in the tree is in `packages/extraction`.
+`packages/utterance`** — the model SDK *implementation* is `packages/extraction`'s alone.
+(`packages/eval` declares `@anthropic-ai/sdk` as of Step 5.1, but only to type the client it
+hands to `AnthropicExtractor` in the nightly arm; it constructs no model client of its own.)
 
 ### 10.3 New ports
 
@@ -1232,20 +1309,25 @@ you touch `diffBooking`; #3 is the one that would quietly corrupt the number we 
 ~~Step 4 — the `Effect[]` binding.~~ Core built 2026-07-10. `packages/runtime`'s `CallRuntime`
 drives a whole call against fakes; read its seven surprises before you touch the port, and #1
 first — the `VoiceSession` speaks and returns `SpeechOutcome`, it does not emit `MachineEvent`.
+~~Step 5 — eval over the real path.~~ Core built 2026-07-10. `simulate.ts` now drives extraction
+through the real `SlotExtractor` port (`FakeExtractor` in the PR suite, `AnthropicExtractor` in
+the nightly arm); read surprise #1 — a fill now *scripts the fake*, it is not a value baked into
+the scenario.
 
-1. **Step 4 — the live-call gate.** ← you are here, and it is the *hardware* half now. The
-   `Effect[]` binding is tested; what remains needs credentials this laptop does not have:
-   4.2 (Twilio → SIP → LiveKit), 4.6 (GPT-Realtime behind `apps/agent/voice/`), and 4.10
-   (a live Housecall Pro sandbox, which also closes Step 2's exit criterion). `apps/agent` is a
-   documented scaffold; wiring it to a microphone is the work. The seam has five `Effect`
-   variants, and `GREET` must be the first thing performed — `greeting_delivered` blocks the
-   call until it has.
-2. **Step 5 — eval over the real path.** Now overlappable: bind `CallRuntime` into the eval
-   harness (5.1), and task 5.5 measures the prompt cache before anyone quotes §10.5's cost model.
+1. **Step 6 — correction triage + FAQ.** ← you are here. Classify each diff
+   `agent_error | business_change | enrichment` in a nightly `claude-opus-4-8` pass; only
+   `agent_error` counts against `correctionRate`. Store the raw diff unclassified forever, publish
+   the human-audit agreement rate, and put FAQ retrieval (`pgvector`) behind a filler utterance.
+   You need corrections before you can classify them, which is why the raw diff (Step 2) came first.
+2. **The credentialed tails of Steps 4 and 5, whenever the accounts exist.** 4.2 (Twilio → SIP →
+   LiveKit), 4.6 (GPT-Realtime), 4.10 (live Housecall Pro sandbox), 5.2 (LLM caller personas),
+   5.3 (real-SIP barge-in/turn-take), 5.5 (the live prompt-cache measurement). Each is built to
+   the port and waiting for a key; none is on the critical path to Step 6.
 
 The uncertain parts are retired: the model integration (Step 1), the wedge computation (Step 2),
-the committed catalog (Step 3), and now the whole conversational control loop (Step 4's core).
-What is left in Step 4 is plumbing to hardware, not risk.
+the committed catalog (Step 3), the whole conversational control loop (Step 4's core), and the
+extraction seam under the eval (Step 5's core). What is left in Steps 4 and 5 is plumbing to
+hardware and credentials, not risk.
 
 **Before you finish any step:** update the progress board at the top of this file and the
 step's own heading, in the same commit as the code. If you changed a boundary or a principle,

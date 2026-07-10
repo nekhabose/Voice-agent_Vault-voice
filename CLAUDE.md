@@ -103,7 +103,7 @@ packages/
   workflows/     Saga engine + post-call booking transaction + the outcome poller.
   telemetry/     Reliability metrics + latency/turn-taking budgets.
   db/            Drizzle schema + migrations. Schema only — no client, no pool.
-  eval/          Simulated-caller harness. Scenarios run in CI.
+  eval/          Simulated-caller harness. Scenarios run in CI, over the real SlotExtractor port.
 apps/
   web/           Next.js contractor dashboard.
   agent/         Python LiveKit worker scaffold + generated Pydantic. No hardware yet (Step 4.2/4.6).
@@ -115,7 +115,7 @@ apps/
 contracts ──► conversation ──► validators ──► eval
     │              │               ▲   │        ▲
     ├──► safety ───┼───────────────┘   │────────┘
-    ├──► extraction ───────────────────┼─────────┘  (eval binds it at Step 5.1; runtime binds it in tests)
+    ├──► extraction ───────────────────┼─────────┘  (eval binds it as of Step 5.1; runtime binds it in tests)
     ├──► utterance ────────────────────┤            (runtime binds it in tests)
     ├──► crm ──► workflows ┄┄► telemetry            (┄ = test-only)
     ├──► runtime ┄┄► {extraction, utterance, telemetry}   (runtime deps: conversation, safety, validators)
@@ -123,10 +123,19 @@ contracts ──► conversation ──► validators ──► eval
     └──► db
 ```
 
-`extraction` depends on `contracts` alone. The only model SDK in the tree lives there, and it
-stays there — `runtime` binds a `SlotExtractor`, never `AnthropicExtractor` directly (it takes
-the port; tests inject `FakeExtractor`). `utterance` also depends on `contracts` alone —
-`LlmUtterer` reaches a model through a local `Phraser` port rather than importing the SDK.
+`extraction` depends on `contracts` alone. The model SDK *implementation* lives there and stays
+there — `runtime` binds a `SlotExtractor`, never `AnthropicExtractor` directly (it takes the
+port; tests inject `FakeExtractor`). `utterance` also depends on `contracts` alone — `LlmUtterer`
+reaches a model through a local `Phraser` port rather than importing the SDK.
+
+`eval` depends on `extraction` **at runtime**, as of Step 5.1 — the dependency diagram always
+anticipated it ("eval binds it as of Step 5.1"). `simulate.ts` drives the real `SlotExtractor`
+port; `eval/src/extractors.ts` binds `FakeExtractor` (scripted from each scenario's fills, the PR
+arm) and `AnthropicExtractor` (the nightly arm, `anthropicExtractor(client)`). `eval` therefore
+also declares `@anthropic-ai/sdk`, but only to *type the client* it hands to `AnthropicExtractor`;
+it never constructs one in shipping code, and the PR suite never calls a live model. The nightly
+binding is proven offline through an injected `fetch` against a committed `tool_use` body, exactly
+as `extraction`'s own replay suite works.
 
 `runtime` is the Step 4 `Effect[]` binding. It depends on `contracts`, `conversation`, `safety`,
 and `validators` at runtime, and on `extraction`, `utterance`, and `telemetry` **as
@@ -354,7 +363,7 @@ does not compile.
 
 ## Testing
 
-611 tests, 99.18% line coverage, thresholds enforced in `vitest.config.ts`.
+616 tests, 99.19% line coverage, thresholds enforced in `vitest.config.ts`.
 
 | Layer | Where | What it proves |
 |---|---|---|
@@ -366,7 +375,7 @@ does not compile.
 | Runtime | `runtime` | A whole call driven through the **real** machine, classifier, validators, and `Effect[]` binding against `FakeVoiceSession` — greeting/disclosure first, out-of-order-safe read-backs, correction revokes confirmation, extraction outage retries then escalates as `AGENT_ERROR`, hazard on an ASR partial short-circuits before the extractor, and every turn traced so `checkBudgets()` scores it (silence breaches `turnTakeRate`) |
 | Drift | `db` | Every `pgEnum` equals its Zod source. No database is touched; that needs Neon |
 | Integration | `workflows` | The booking saga, including the forced `create_job` failure and its compensating rollback. And the outcome poller — a hand-edited job body through the real adapter, the real diff, and the real `computeMetrics()` |
-| End-to-end | `eval` | Simulated callers through the real machine, classifier, and validators |
+| End-to-end | `eval` | Simulated callers through the real machine, classifier, validators, **and `SlotExtractor` port** — a fill scripts `FakeExtractor`, and the value flows text → port → validators → machine; the nightly `AnthropicExtractor` binding is driven offline through an injected `fetch` |
 
 ### Rules
 
@@ -407,9 +416,17 @@ Stated plainly, because a README that implies otherwise is marketing.
   Two things nobody has verified: what `claude-sonnet-5` actually emits, and
   whether the prompt-cache prefix is even large enough to cache (it is a few
   hundred tokens against a Sonnet-tier minimum near 2k, and a short prefix caches
-  *silently*). See `plan.md` Step 1, surprises #4 and #5.
-- **`eval` still uses its own inline extractor stub.** `FakeExtractor` exists and
-  nothing binds it yet; that is task 5.1, left undone rather than half-done.
+  *silently*). See `plan.md` Step 1, surprises #4 and #5, and Step 5.5 — the
+  nightly arm that would settle both is bound (`eval/src/extractors.ts`) but has
+  never called a live model, because no credential exists here.
+- **`eval` now binds the real `SlotExtractor` port** (Step 5.1), but only the fake
+  side runs. The PR suite drives `FakeExtractor` scripted from each scenario's
+  fills; the nightly `AnthropicExtractor` binding is proven offline through an
+  injected `fetch`, never against a live model. So the eval's critical-slot
+  accuracy proves the port, the validators, and the machine carry values through
+  intact — **not** that `claude-sonnet-5` heard them right. That, and re-recording
+  the fixtures, is task 5.5. The LLM-driven caller personas (5.2) and the real-SIP
+  barge-in/turn-take arm (5.3) are the other two credential/hardware-gated tails.
 - **`readJob` has never spoken to a live CRM.** `observeOutcome()` now produces
   the `BookingOutcome[]` that `computeMetrics()` consumes, and the whole path is
   exercised end to end — but through `FakeTransport`, against a job body edited by
@@ -512,7 +529,10 @@ Stated plainly, because a README that implies otherwise is marketing.
   raw extraction to the three validators. **Not duplicates to merge:** `toEvent`
   also builds a `MachineEvent` for a text-driven harness, and the two pull apart the
   moment either changes. The validator *set* is the contract; a new one is a compile
-  error in both.
+  error in both. As of Step 5.1 the **outage-retry policy** is a third deliberate
+  twin: `eval`'s `extractAndBuild` retries an `unavailable` once and then drives
+  `AGENT_ERROR`, exactly as `CallRuntime.extractAndApply` does. Same contract, two
+  sides of the port — do not let one drift, or the eval misreports the runtime.
 - Regenerate `apps/agent/contracts.schema.json` with `npm run gen:contracts` in the
   same commit as any change to `Effect` or `PendingBooking`; `contracts/src/codegen.test.ts`
   fails the build otherwise. `contracts.py` is a generated, `.gitignore`d artifact —
@@ -521,6 +541,29 @@ Stated plainly, because a README that implies otherwise is marketing.
 ---
 
 ## Change log
+
+- **Step 5 (core) — the eval binds the real `SlotExtractor` port.** *(616 tests, 99.19% coverage,
+  typecheck clean, `apps/web` builds.)* `packages/eval/src/simulate.ts` no longer bakes the
+  extracted value into the scenario: a fill now *declares* which slot a turn states and *scripts
+  the fake*, and the caller's utterance text flows text → `SlotExtractor` → validators → machine —
+  the same path `CallRuntime` performs. `SimulationDeps` gains `makeExtractor: (scenario) =>
+  SlotExtractor`; `evalDeps()` binds `FakeExtractor` scripted from each scenario (`extractors.ts`,
+  `scriptFromScenario`), and the nightly arm binds `AnthropicExtractor` over the same seam
+  (`anthropicExtractor(client)`), proven offline through an injected `fetch` against a committed
+  `tool_use` body — zero live model calls. The outage-retry-then-`AGENT_ERROR` policy now mirrors
+  `CallRuntime.extractAndApply` on both sides of the port; the two are the same contract, and a
+  suite that let one drift would misreport what the runtime does.
+
+  **One boundary moved:** `eval` now depends on `@ledgerline/extraction` **at runtime** (and
+  declares `@anthropic-ai/sdk`, used only to type the client it hands to `AnthropicExtractor`).
+  The dependency diagram always anticipated this — "eval binds it as of Step 5.1."
+
+  **What is deferred, and named** — the same precedent as Steps 1–4's live halves: the nightly
+  `AnthropicExtractor` arm has never called a live model, so re-recording the fixtures and the live
+  prompt-cache assertion is task 5.5; the LLM-driven caller personas (5.2, `claude-opus-4-8`) and
+  the real-SIP barge-in/turn-take arm (5.3) need a credential and a SIP trunk this environment does
+  not have. 5.4's turn-take gate already lives in `runtime.test.ts`, over real traced turns; the
+  text-driven eval has no latency model, so its turn-take number is the SIP arm's.
 
 - **Step 4 (core) — `packages/runtime` + `apps/agent` scaffold + codegen.** *(611 tests, 99.18%
   coverage, typecheck clean, `apps/web` builds.)* The `Effect[]` binding, made real and testable

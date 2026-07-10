@@ -9,8 +9,10 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
     "@ledgerline/contracts": "*",
     "@ledgerline/conversation": "*",
+    "@ledgerline/extraction": "*",
     "@ledgerline/safety": "*",
     "@ledgerline/validators": "*"
   }
