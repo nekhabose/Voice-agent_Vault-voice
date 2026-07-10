@@ -6,17 +6,49 @@ Working notes for agents and humans in this repo. Read this before changing code
 > or alters an architectural principle updates this file in the same commit. A
 > stale CLAUDE.md is worse than none — it teaches the next reader something false.
 
+## Before you start work
+
+**The work is `plan.md` §9, a numbered list of Steps 0–9. Read the progress board at
+the top of `plan.md` to see where the build actually is.** Do not infer it from the
+code, and do not trust a step's prose over the board.
+
+**When you finish a Step, you are not done until `plan.md` says so.** In the same
+commit as the code:
+
+1. Flip that Step's row on the **progress board** to `✅ Done — <date>`, and move the
+   `← next` marker to the following Step.
+2. Mark the Step's **own heading** `✅ Done`, tick its sub-tasks, and write down what
+   came out *different* from what the Step predicted — the surprises are the part worth
+   reading later.
+3. Update the **status table** if the test count, coverage, or build changed.
+4. If you found something that belongs to a later Step, record it there explicitly
+   rather than leaving it in a commit message.
+5. If you moved a boundary or a principle, update this file too, and add a change-log
+   entry at the bottom.
+
+This is not bookkeeping. Someone opens a fresh session, says "continue with Step 2,"
+and the only thing standing between them and repeating your work is whether you did
+the above.
+
 ---
 
 ## What this is
 
-**Ledgerline** — an inbound-call voice agent for US home-services contractors,
-Spanish-first. A missed call at a plumbing shop is a lost job worth hundreds of
+**Ledgerline** — an English-language inbound-call voice agent for US home-services
+contractors. A missed call at a plumbing shop is a lost job worth hundreds of
 dollars; the conversation needed to capture it is bounded.
 
-The source of truth for *why* is [`plan.md`](./plan.md), which derives from the
-research in [`idea.md`](./idea.md). This file describes *what exists* and *how to
-work on it*.
+The wedge is **reliability, measured and published**: nobody in this industry
+reports how often their agent gets the address right, and we will, per tenant,
+from call one. That makes `outcomes.correctedFields` the product rather than a
+metric — see `plan.md`, principle #5.
+
+- [`idea.md`](./idea.md) — the upstream research. Deliberately *not* revised to
+  match later decisions; it is the evidence record.
+- [`plan.md`](./plan.md) — the single source of truth for *why*, *what*, and
+  *how*: principles, the LLM surface, the step-by-step build order, and the
+  implementation reference (§10) the steps point at.
+- This file — *what exists* and *how to work on it*.
 
 ---
 
@@ -136,6 +168,12 @@ bilingual lexicon, running on every ASR partial, independent of the model.
 
 - **Recall is a hard constraint; precision is a cost we measure.** A false
   positive costs one annoyed dispatcher. A false negative costs a house.
+- **The lexicon stays bilingual even though the product is English-only.**
+  `SMELL_VERBS` carries `huele`/`olor`; `GAS_NOUNS` carries `propano`. A
+  Spanish-speaking homeowner can dial an English-only shop, and panic reverts
+  people to their first language. `huele a gas` must transfer. These phrases look
+  like dead code after the English-only pivot. Deleting them is the one edit in
+  this repo that could kill someone.
 - **No negation or tense suppression.** "There's no gas leak, right?" transfers.
   Suppressing on "no" is how you miss "no, I mean there IS a gas leak."
   `KNOWN_FALSE_POSITIVES` in `corpus.ts` pins this so a future "fix" is a
@@ -186,7 +224,7 @@ publishes it.
 
 ## Testing
 
-384 tests, 98.8% line coverage, thresholds enforced in `vitest.config.ts`.
+391 tests, 98.8% line coverage, thresholds enforced in `vitest.config.ts`.
 
 | Layer | Where | What it proves |
 |---|---|---|
@@ -215,21 +253,33 @@ publishes it.
 
 Stated plainly, because a README that implies otherwise is marketing.
 
-- **Phase 0 is not done.** It needs ~150 real code-switched audio samples and
-  live GPT-Realtime / Gemini Live keys. `plan.md` says do not write product code
-  until the wedge survives it. The domain core here is wedge-agnostic — if Phase 0
-  kills multilingual, the same machine serves an English-only trade wedge.
+- **No LLM is wired. Anywhere.** Zero model SDKs in the dependency tree. The slot
+  extractor is a stub — `packages/eval/src/simulate.ts:33` says so, deliberately.
+  `plan.md` §10.1 specifies the real one: strict tool use, one tool per slot,
+  schema derived from `SLOT_SPECS[key].schema` so the contract and the model's
+  output space are the same object.
+- **Nothing produces `BookingOutcome[]`.** `computeMetrics()` (`metrics.ts:41`)
+  accepts the contractor's later edits and cancellations as ground truth, and no
+  code emits them. Since that number *is* the wedge, `CrmAdapter.readJob` plus a
+  polling outcome pipeline is Step 2 in `plan.md` §9 — before telephony, not after.
 - **No telephony, no LiveKit, no realtime model.** The `Effect[]` type is the seam
   the voice runtime binds to. The plan puts the agent worker in Python; the core
   is TypeScript and pure, so it can drive either through a typed boundary.
 - **No database.** The data model in `plan.md` is not yet Drizzle schema.
   `apps/web/lib/demo-data.ts` seeds the dashboard and is typed against the real
   contracts, so the UI cannot drift.
-- **No auth, no multi-tenancy, no billing.** Phase 4.
+- **No auth, no multi-tenancy, no billing.** Step 7.
 - **`eval` does not run over real SIP.** It answers "given what the caller said,
   does the system do the right thing?" The latency and barge-in numbers that are
   comparable to the literature require the SIP path.
-- **No compliance work.** Phase 5 gates revenue, not code.
+- **No compliance work.** Step 8 gates revenue, not code.
+- **Locale is recorded, never acted on.** `LocaleSchema` (`primitives.ts:29`) and
+  `PendingBookingPayload.locale` stay — one field, and keeping the core
+  wedge-agnostic is what made the English-only pivot free. `customer.locale` rides
+  the booking to the CRM so a human knows what language to call back in. Nothing
+  branches on it: the SMS is English, the utterances are English, the extractor
+  will be English. The **safety classifier is the deliberate exception** — see
+  principle #4 and `safety/english-only-pivot.test.ts`.
 
 ---
 
@@ -254,6 +304,32 @@ Stated plainly, because a README that implies otherwise is marketing.
 
 ## Change log
 
+- **Step 0 — pivot cleanup.** *(391 tests, 98.82% coverage, `apps/web` builds.)*
+  `confirmationBody()` and `formatWindow()` no longer take a `Locale`: the
+  confirmation SMS is English whatever locale the caller was tagged with, because
+  we do not send a message no contractor can proofread. `customer.locale` still
+  rides the `PendingBooking` to the CRM, so a human knows what language to call
+  back in. Replaced the code-switched *booking* eval scenario with
+  `english/answers-in-fragments`; renamed the two Spanish hazard scenarios to
+  `hazard/*` and kept them, because the booking flow is English-only and the
+  classifier is not — that boundary is the pivot, and it is now asserted rather
+  than implied. Added `safety/english-only-pivot.test.ts`, a named tripwire
+  carrying the rationale. Dashboard demo data is English, except the one emergency
+  caller who reverts to Spanish when she smells gas.
+- **English-only pivot; reliability becomes the wedge.** *(docs only — no code
+  changed; 384 tests, 98.78% coverage, typecheck and `apps/web` build all verified
+  green at the time of writing.)* Dropped the Spanish-first wedge and with it
+  the Phase 0 code-switching audio gate and the multilingual phase. The domain
+  core needed no changes, which is exactly what "wedge-agnostic" was for.
+  Replaced the multilingual moat with **measured, published reliability**, which
+  promotes `outcomes.correctedFields` from a late metrics chore to Step 2 of the
+  build — before telephony — and adds `CrmAdapter.readJob` plus a polling outcome
+  pipeline (webhooks are lossy, and a missed webhook silently reports a 0%
+  correction rate). Kept the bilingual hazard lexicon — see principle #4.
+  Rewrote `plan.md` as the single source of truth: principles, the LLM surface,
+  the new ports (`SlotExtractor`, `Utterer`, `VoiceSession`), build-time utterance
+  generation, a Step 0–9 build order, an implementation reference (§10), and the
+  experiment that would falsify principle #1.
 - **Initial build.** Monorepo scaffold; `contracts`; `SlotBook` with confidence,
   confirmation, and backtracking; the seven-state machine with guard verdicts
   (`pass` / `block` / `escalate`); deterministic bilingual emergency classifier

@@ -41,7 +41,11 @@ export const CallRecordSchema = z.object({
   fromE164: E164Schema,
   startedAt: IsoTimestampSchema,
   endedAt: IsoTimestampSchema.nullable(),
-  /** Every locale observed, in order — code-switching is the normal case. */
+  /**
+   * Locales observed on the call. The product is English-only, so in practice
+   * this is `["en"]`. The array shape and `LocaleSchema` stay because keeping the
+   * core wedge-agnostic is what made the English-only pivot cost nothing.
+   */
   localesDetected: z.array(LocaleSchema),
   outcome: CallOutcomeSchema.nullable(),
   /** Booked with no human involvement. Derived, never hand-set. */

@@ -139,7 +139,6 @@ export async function commitBooking(
       await deps.sms.send({
         to: booking.customer.phone,
         body: confirmationBody(
-          booking.customer.locale,
           booking.address.formatted,
           booking.window,
           deps.timeZone,

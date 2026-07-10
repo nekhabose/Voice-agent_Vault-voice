@@ -39,7 +39,6 @@ export interface DemoCall {
   readonly record: CallRecord;
   readonly callerName: string;
   readonly summary: string;
-  readonly locale: "en" | "es";
   readonly turns: readonly CallTurn[];
   readonly slots: readonly DemoSlot[];
   /** Only meaningful while the call is live. */
@@ -107,17 +106,16 @@ function record(
 /* -------------------------------------------------------------------------- */
 
 const live: DemoCall = {
-  record: record("live-1", "2026-07-08T17:42:00.000Z", null, ["es", "en"], "+13055557781"),
+  record: record("live-1", "2026-07-08T17:42:00.000Z", null, ["en"], "+13055557781"),
   callerName: "Rosa Delgado",
   summary: "Water heater leaking into the garage",
-  locale: "es",
   state: "SCHEDULE",
   turns: [
-    turn("live-1", 0, "agent", "GREETING", "Rivera Plumbing, le atiende un asistente automático. ¿En qué le puedo ayudar?", { firstWord: 380, total: 1600 }),
-    turn("live-1", 1, "caller", "IDENTIFY", "Hola, soy Rosa Delgado. My water heater está leaking."),
-    turn("live-1", 2, "agent", "TRIAGE", "Entiendo, un calentador con fuga. ¿Está saliendo mucha agua?", { firstWord: 410, total: 1500 }),
-    turn("live-1", 3, "caller", "TRIAGE", "Un poquito, pero está mojando el garaje."),
-    turn("live-1", 4, "agent", "SCHEDULE", "Podemos ir mañana entre las 2 y las 6 de la tarde. ¿Le funciona?", { firstWord: 520, total: 1800 }),
+    turn("live-1", 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant. How can I help?", { firstWord: 380, total: 1600 }),
+    turn("live-1", 1, "caller", "IDENTIFY", "Hi, this is Rosa Delgado. My water heater is leaking."),
+    turn("live-1", 2, "agent", "TRIAGE", "Understood, a leaking water heater. Is much water coming out?", { firstWord: 410, total: 1500 }),
+    turn("live-1", 3, "caller", "TRIAGE", "Just a little, but it's soaking the garage."),
+    turn("live-1", 4, "agent", "SCHEDULE", "We can be there tomorrow between 2 and 6 PM. Does that work?", { firstWord: 520, total: 1800 }),
   ],
   slots: [
     { key: "caller_name", label: "Name", value: "Rosa Delgado", confidence: 0.96, confirmed: false },
@@ -128,21 +126,21 @@ const live: DemoCall = {
   ],
 };
 
-const bookedCodeSwitch: DemoCall = {
-  record: record("call-2", "2026-07-08T16:10:00.000Z", "BOOKED", ["es", "en"], "+13055552210"),
+/** Spells her surname. The read-back is what stops a mis-transcribed name reaching the CRM. */
+const bookedSpelledName: DemoCall = {
+  record: record("call-2", "2026-07-08T16:10:00.000Z", "BOOKED", ["en"], "+13055552210"),
   callerName: "Marisol Peña",
   summary: "No hot water since last night",
-  locale: "es",
   state: "CLOSE",
   turns: [
     turn("call-2", 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant. How can I help?", { firstWord: 340, total: 1500 }),
-    turn("call-2", 1, "caller", "IDENTIFY", "Hola — no hay agua caliente desde anoche."),
-    turn("call-2", 2, "agent", "IDENTIFY", "Con gusto le ayudo. ¿Me da su nombre?", { firstWord: 390, total: 1400 }),
+    turn("call-2", 1, "caller", "IDENTIFY", "There's been no hot water since last night."),
+    turn("call-2", 2, "agent", "IDENTIFY", "Happy to help. Can I get your name?", { firstWord: 390, total: 1400 }),
     turn("call-2", 3, "caller", "IDENTIFY", "Marisol Peña. P-E-Ñ-A."),
-    turn("call-2", 4, "agent", "QUALIFY", "Gracias. ¿Cuál es la dirección del servicio?", { firstWord: 420, total: 1500 }),
-    turn("call-2", 5, "caller", "QUALIFY", "Es el 830 de la Southwest Eighth Street."),
-    turn("call-2", 6, "agent", "CONFIRM", "Confirmo: 830 SW 8th Street, Miami, 33130. ¿Correcto?", { firstWord: 610, total: 1900, bargeIn: true }),
-    turn("call-2", 7, "caller", "CONFIRM", "Sí, correcto."),
+    turn("call-2", 4, "agent", "QUALIFY", "Thank you. What's the service address?", { firstWord: 420, total: 1500 }),
+    turn("call-2", 5, "caller", "QUALIFY", "It's 830 Southwest Eighth Street."),
+    turn("call-2", 6, "agent", "CONFIRM", "Confirming: 830 SW 8th Street, Miami, 33130. Is that right?", { firstWord: 610, total: 1900, bargeIn: true }),
+    turn("call-2", 7, "caller", "CONFIRM", "Yes, that's right."),
   ],
   slots: [
     { key: "caller_name", label: "Name", value: "Marisol Peña", confidence: 0.94, confirmed: true },
@@ -158,7 +156,6 @@ const bookedEnglish: DemoCall = {
   record: record("call-3", "2026-07-08T15:02:00.000Z", "BOOKED", ["en"], "+17865550143"),
   callerName: "Daniel Okafor",
   summary: "Kitchen sink drain backing up",
-  locale: "en",
   state: "CLOSE",
   turns: [
     turn("call-3", 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant. How can I help?", { firstWord: 360, total: 1500 }),
@@ -186,11 +183,15 @@ const bookedEnglish: DemoCall = {
   ],
 };
 
+/**
+ * The product is English-only. The emergency classifier is not, on purpose.
+ * She reverted to her first language the moment she smelled gas, and we still
+ * got her out of the house. See `plan.md` principle #4.
+ */
 const emergency: DemoCall = {
-  record: record("call-4", "2026-07-08T14:38:00.000Z", "ESCALATED_EMERGENCY", ["es"], "+13055559902"),
+  record: record("call-4", "2026-07-08T14:38:00.000Z", "ESCALATED_EMERGENCY", ["en"], "+13055559902"),
   callerName: "Unknown caller",
   summary: "Caller reported a gas smell in the kitchen",
-  locale: "es",
   state: "HANDOFF",
   escalationReason: "EMERGENCY_HAZARD",
   hazard: {
@@ -200,9 +201,9 @@ const emergency: DemoCall = {
     ruleId: "gas.smell.cooccurrence",
   },
   turns: [
-    turn("call-4", 0, "agent", "GREETING", "Rivera Plumbing, le atiende un asistente automático.", { firstWord: 350, total: 1500 }),
+    turn("call-4", 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant.", { firstWord: 350, total: 1500 }),
     turn("call-4", 1, "caller", "IDENTIFY", "Huele a gas en la cocina, no sé qué hacer."),
-    turn("call-4", 2, "agent", "EMERGENCY", "Salga de la casa ahora y llame al 911. Le comunico con una persona.", { firstWord: 290, total: 1300 }),
+    turn("call-4", 2, "agent", "EMERGENCY", "Leave the house now and call 911. I'm connecting you to a person.", { firstWord: 290, total: 1300 }),
   ],
   slots: [
     { key: "problem_description", label: "Problem", value: "Gas smell in the kitchen", confidence: 0.82, confirmed: false },
@@ -213,7 +214,6 @@ const outOfArea: DemoCall = {
   record: record("call-5", "2026-07-08T13:20:00.000Z", "OUT_OF_SERVICE_AREA", ["en"], "+19545550077"),
   callerName: "Priya Raman",
   summary: "Address in Fort Lauderdale — outside the service polygon",
-  locale: "en",
   state: "HANDOFF",
   escalationReason: "OUT_OF_SERVICE_AREA",
   turns: [
@@ -232,7 +232,6 @@ const hungUp: DemoCall = {
   record: record("call-6", "2026-07-08T12:04:00.000Z", "CALLER_HUNG_UP", ["en"], "+13055554417"),
   callerName: "Unknown caller",
   summary: "Hung up during a slow greeting",
-  locale: "en",
   state: "CLOSE",
   turns: [
     turn("call-6", 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant.", { firstWord: 1_450, total: 3_200 }),
@@ -249,7 +248,6 @@ interface RoutineSpec {
   readonly at: string;
   readonly name: string;
   readonly summary: string;
-  readonly locale: "en" | "es";
   readonly from: string;
   readonly address: string;
   readonly window: string;
@@ -264,10 +262,9 @@ interface RoutineSpec {
 function routine(spec: RoutineSpec): DemoCall {
   const [greet, capture, confirm] = spec.timings;
   return {
-    record: record(spec.id, spec.at, "BOOKED", [spec.locale], spec.from),
+    record: record(spec.id, spec.at, "BOOKED", ["en"], spec.from),
     callerName: spec.name,
     summary: spec.summary,
-    locale: spec.locale,
     state: "CLOSE",
     turns: [
       turn(spec.id, 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant.", greet),
@@ -291,50 +288,50 @@ function routine(spec: RoutineSpec): DemoCall {
 const ROUTINE: readonly DemoCall[] = [
   routine({
     id: "call-7", at: "2026-07-08T17:05:00.000Z", name: "Ibrahim Sow",
-    summary: "Sump pump isn't kicking on", locale: "en", from: "+13055556620",
+    summary: "Sump pump isn't kicking on", from: "+13055556620",
     address: "745 NE 79th St, Miami, FL 33138", window: "Fri Jul 10, 8:00–11:00 AM",
     timings: [{ firstWord: 355, total: 1450 }, { firstWord: 420, total: 1600 }, { firstWord: 505, total: 1750 }],
   }),
   routine({
     id: "call-8", at: "2026-07-08T16:35:00.000Z", name: "Hannah Cole",
-    summary: "Annual maintenance visit", locale: "en", from: "+13055551188",
+    summary: "Annual maintenance visit", from: "+13055551188",
     address: "218 Malaga Ave, Coral Gables, FL 33134", window: "Mon Jul 13, 1:00–4:00 PM",
     timings: [{ firstWord: 322, total: 1310 }, { firstWord: 388, total: 1520 }, { firstWord: 610, total: 1880, bargeIn: true }],
   }),
   routine({
     id: "call-9", at: "2026-07-08T15:40:00.000Z", name: "Javier Ortiz",
-    summary: "Low water pressure upstairs", locale: "es", from: "+13055557734",
+    summary: "Low water pressure upstairs", from: "+13055557734",
     address: "3410 SW 22nd St, Miami, FL 33145", window: "Thu Jul 9, 9:00 AM–12:00 PM",
     // The one turn all day where the agent simply did not answer.
     timings: [{ firstWord: 341, total: 1400 }, { firstWord: 0, total: 0, missed: true }, { firstWord: 470, total: 1690 }],
   }),
   routine({
     id: "call-10", at: "2026-07-08T14:12:00.000Z", name: "Beatrice Adeyemi",
-    summary: "Leaking outdoor spigot", locale: "en", from: "+17865559041",
+    summary: "Leaking outdoor spigot", from: "+17865559041",
     address: "1290 NW 54th St, Miami, FL 33142", window: "Fri Jul 10, 1:00–4:00 PM",
     timings: [{ firstWord: 368, total: 1470 }, { firstWord: 402, total: 1580 }, { firstWord: 533, total: 1810 }],
   }),
   routine({
     id: "call-11", at: "2026-07-08T13:55:00.000Z", name: "Carlos Mendoza",
-    summary: "Garbage disposal is jammed", locale: "es", from: "+13055553390",
+    summary: "Garbage disposal is jammed", from: "+13055553390",
     address: "922 SW 12th Ave, Miami, FL 33130", window: "Thu Jul 9, 3:00–6:00 PM",
     timings: [{ firstWord: 349, total: 1420 }, { firstWord: 915, total: 1900, bargeIn: true }, { firstWord: 488, total: 1720 }],
   }),
   routine({
     id: "call-12", at: "2026-07-08T12:31:00.000Z", name: "Nguyen Thi Lan",
-    summary: "Slow bathroom drain", locale: "en", from: "+13055558812",
+    summary: "Slow bathroom drain", from: "+13055558812",
     address: "6100 Biscayne Blvd, Miami, FL 33137", window: "Mon Jul 13, 8:00–11:00 AM",
     timings: [{ firstWord: 334, total: 1380 }, { firstWord: 396, total: 1550 }, { firstWord: 512, total: 1770 }],
   }),
   routine({
     id: "call-13", at: "2026-07-08T11:48:00.000Z", name: "Greg Whitman",
-    summary: "Water heater pilot won't stay lit", locale: "en", from: "+17865552204",
+    summary: "Water heater pilot won't stay lit", from: "+17865552204",
     address: "455 Grand Bay Dr, Key Biscayne, FL 33149", window: "Thu Jul 9, 1:00–4:00 PM",
     timings: [{ firstWord: 377, total: 1490 }, { firstWord: 441, total: 1630 }, { firstWord: 1_000, total: 1_895, bargeIn: true }],
   }),
   routine({
     id: "call-14", at: "2026-07-08T11:15:00.000Z", name: "Alicia Fuentes",
-    summary: "Toilet running constantly", locale: "es", from: "+13055550098",
+    summary: "Toilet running constantly", from: "+13055550098",
     address: "1580 NW 27th Ave, Miami, FL 33125", window: "Fri Jul 10, 8:00–11:00 AM",
     timings: [{ firstWord: 361, total: 1440 }, { firstWord: 409, total: 1590 }, { firstWord: 496, total: 1740 }],
   }),
@@ -343,7 +340,7 @@ const ROUTINE: readonly DemoCall[] = [
 /** Newest first — the order a dispatcher reads them in. */
 export const CALLS: readonly DemoCall[] = [
   live,
-  bookedCodeSwitch,
+  bookedSpelledName,
   bookedEnglish,
   emergency,
   outOfArea,

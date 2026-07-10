@@ -4,10 +4,11 @@
 
 **Every call answered. Every job booked.**
 
-An inbound-call voice agent for US home-services contractors — Spanish-first,
-built to work on models that fail the benchmark.
+An English-language inbound-call voice agent for US home-services contractors —
+built to work on models that fail the benchmark, and to tell you exactly how
+often it gets it right.
 
-[![tests](https://img.shields.io/badge/tests-384_passing-1a7a47)](#verification)
+[![tests](https://img.shields.io/badge/tests-391_passing-1a7a47)](#verification)
 [![coverage](https://img.shields.io/badge/coverage-98.8%25-1a7a47)](#verification)
 [![typecheck](https://img.shields.io/badge/typecheck-strict-0f6d68)](#verification)
 [![emergency recall](https://img.shields.io/badge/emergency_recall-1.00-b3261e)](#the-emergency-classifier-does-not-ask-a-model-for-permission)
@@ -52,10 +53,14 @@ So we never ask the model to do the thing it fails at:
 A 14.8%-reliable agentic task becomes a five-field extraction task plus a database
 transaction. That reframing is the entire product.
 
-The wedge is **multilingual US metro trades**: Spanish-first, for the
-immigrant-owned and immigrant-serving contractor market that incumbents skip.
-Code-switching mid-call — *"Hola, uh, my water heater está leaking"* — is the
-normal case, not the edge case.
+The wedge is **reliability, measured and published.** Every competitor asserts
+that their agent works. None of them will tell you how often a contractor had to
+go fix the booking afterwards — the number isn't published anywhere in this
+industry. We compute it per tenant, from the first call, and put it on the
+contractor's dashboard even when it looks bad.
+
+`outcomes.correctedFields` — every booking the contractor edits or cancels — is a
+labeled failure. It is the only number that matters, and it is the product.
 
 ---
 
@@ -63,7 +68,7 @@ normal case, not the edge case.
 
 ```bash
 npm install
-npm run check          # typecheck + 384 tests
+npm run check          # typecheck + 391 tests
 ```
 
 Run the contractor dashboard:
@@ -90,7 +95,7 @@ almost entirely on state rather than decoration.
   │              Emergency — transferred to a human          │     that shouts
   └──────────────────────────────────────────────────────────┘
 
-  In progress                                        ● Spanish
+  In progress
   Rosa Delgado · Water heater leaking into the garage
   ●───────●───────●───────●───────◉ ─ ─ ─ ○ ─ ─ ─ ○
   GREETING IDENTIFY TRIAGE QUALIFY SCHEDULE CONFIRM CLOSE
@@ -215,6 +220,11 @@ wrong.
   positive costs one annoyed dispatcher; a false negative costs a house.
   `recall === 1.0` is asserted on every run over a 66-sample bilingual corpus
   (38 hazards, 28 routine calls).
+- **The lexicon is bilingual although the product is English-only.** A
+  Spanish-speaking homeowner can dial an English-only shop, and panic reverts
+  people to their first language. *"Huele a gas"* transfers. Those phrases cost
+  nothing at runtime, and deleting them as dead code is the one change in this
+  repo that could kill someone.
 - **No negation suppression.** *"There's no gas leak, right?"* transfers to a
   human. Suppressing a hazard on the word "no" is how you miss *"no, I mean there
   IS a gas leak."* The deliberate false positives are pinned in their own test, so
@@ -261,7 +271,7 @@ Reliability claims in this space are mostly unfalsifiable marketing. These are n
  ✓ telemetry/metrics.test.ts      (25)  percentiles, budgets, the latency/silence trade
  ✓ eval/eval.test.ts              (32)  simulated callers, end to end
 
- Tests  384 passed        Coverage  98.8% lines / 95.3% branches
+ Tests  391 passed        Coverage  98.8% lines / 95.4% branches
 ```
 
 A few of these are load-bearing:
@@ -299,18 +309,22 @@ lines of tests, 13 simulated-caller scenarios.**
 
 Not built, and deliberately not faked:
 
-- **Phase 0 — the wedge gate.** `plan.md` says do not write product code until
-  ~150 real code-switched audio samples show critical-slot accuracy above ~85%.
-  That needs audio and live model keys. If Phase 0 kills the multilingual wedge,
-  the same machine serves an English-only trade wedge — nothing here is
-  Spanish-specific except the lexicon and the prompts.
+- **Any LLM at all.** There is no model SDK in the dependency tree. The slot
+  extractor is a stub, and `packages/eval/src/simulate.ts:33` says so out loud:
+  extraction quality is a question you answer against audio, not one a
+  text-driven harness can honestly claim to have tested. `plan.md` §10.1
+  specifies the real one.
+- **The measurement that is supposedly the product.** `computeMetrics()` takes a
+  `BookingOutcome[]` — the contractor's later edits and cancellations — and
+  nothing emits it yet. Detecting those edits means polling the CRM and diffing.
+  It is Step 2 of the build, because a reliability claim you cannot compute is a slogan.
 - **Telephony.** No Twilio, no LiveKit, no realtime model. `Effect[]` is the seam
   the voice runtime binds to.
-- **Persistence, auth, multi-tenancy, billing.** Phase 4.
+- **Persistence, auth, multi-tenancy, billing.** Step 7.
 - **`eval` over real SIP.** The harness answers *"given what the caller said, does
   the system do the right thing?"* The latency and barge-in numbers that are
   comparable to the literature need the SIP path.
-- **Compliance.** AI disclosure, two-party consent, recording retention. Phase 5
+- **Compliance.** AI disclosure, two-party consent, recording retention. Step 8
   gates revenue, not code.
 
 See [`CLAUDE.md`](./CLAUDE.md) for conventions and gotchas,

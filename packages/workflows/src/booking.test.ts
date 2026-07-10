@@ -135,10 +135,13 @@ describe("commitBooking — success", () => {
     });
   });
 
-  it("writes the confirmation in the caller's language", async () => {
+  // PAYLOAD's customer has `locale: "es"`. The confirmation is still English —
+  // the product is English-only, and the locale exists to tell the *contractor*
+  // what language to call back in, not to trigger a translation we cannot review.
+  it("writes the confirmation in English, whatever locale the caller was tagged with", async () => {
     const sms = new FakeSms();
     await commitBooking(PENDING_ID, PAYLOAD, deps(new SpyCrm(), sms));
-    expect(sms.sent[0]!.body).toContain("Confirmado");
+    expect(sms.sent[0]!.body).toContain("Confirmed");
     expect(sms.sent[0]!.body).toContain("1247 Calle Ocho");
   });
 });
@@ -492,24 +495,23 @@ describe("confirmation message", () => {
 
   it("renders the window in the tenant's timezone, not the server's", () => {
     // 18:00–22:00 UTC is 2–6 PM in Miami.
-    const text = formatWindow(window, "America/New_York", "en");
+    const text = formatWindow(window, "America/New_York");
     expect(text).toContain("2:00 PM");
     expect(text).toContain("6:00 PM");
     expect(text).toContain("Thursday");
   });
 
-  it("localises the weekday and month for a Spanish caller", () => {
-    const text = formatWindow(window, "America/New_York", "es");
-    expect(text.toLowerCase()).toContain("jueves");
-  });
-
-  it("falls back to English for a locale we have not written yet", () => {
-    const body = confirmationBody("vi", "1247 Calle Ocho", window, "America/New_York");
-    expect(body).toContain("Confirmed");
-  });
-
   it("tells the caller how to cancel", () => {
-    expect(confirmationBody("es", "x", window, "America/New_York")).toContain("CANCELAR");
-    expect(confirmationBody("en", "x", window, "America/New_York")).toContain("CANCEL");
+    expect(confirmationBody("x", window, "America/New_York")).toContain("CANCEL");
+  });
+
+  // The product is English-only, but `customer.locale` survives on the payload and
+  // reaches the CRM so a human can call back appropriately. Asserting the message
+  // ignores it is what stops someone reintroducing a machine-translated SMS that
+  // no contractor can proofread.
+  it("does not vary with the caller's recorded locale", () => {
+    const body = confirmationBody("1247 Ocean Drive", window, "America/New_York");
+    expect(body).toContain("Confirmed");
+    expect(body).not.toMatch(/Confirmado|CANCELAR/);
   });
 });

@@ -103,7 +103,7 @@ describe("backtracking", () => {
 
 describe("the emergency classifier interrupts everything", () => {
   it("abandons a half-finished booking on a gas leak", async () => {
-    const result = await simulate(find("spanish/gas-leak-mid-call"), deps);
+    const result = await simulate(find("hazard/spanish-utterance-on-an-english-line"), deps);
 
     expect(result.hazard).toBe("GAS_LEAK");
     expect(result.outcome).toBe("ESCALATED_EMERGENCY");
@@ -113,7 +113,7 @@ describe("the emergency classifier interrupts everything", () => {
   });
 
   it("uses the weather the caller never mentioned", async () => {
-    const freezing = await simulate(find("spanish/no-heat-in-a-freeze"), deps);
+    const freezing = await simulate(find("hazard/spanish-no-heat-in-a-freeze"), deps);
     expect(freezing.hazard).toBe("NO_HEAT_FREEZING");
     expect(freezing.outcome).toBe("ESCALATED_EMERGENCY");
   });
@@ -163,9 +163,9 @@ describe("caller-driven exits", () => {
   });
 });
 
-describe("code-switching", () => {
-  it("books a caller who switches language mid-sentence", async () => {
-    const result = await simulate(find("spanish/code-switched"), deps);
+describe("fragmentary answers", () => {
+  it("books a caller who never finishes a sentence", async () => {
+    const result = await simulate(find("english/answers-in-fragments"), deps);
     expect(result.outcome).toBe("BOOKED");
     expect(result.slots.caller_name).toBe("Rosa Delgado");
     expect(result.slots.service_address).toBe(MIAMI_FORMATTED);

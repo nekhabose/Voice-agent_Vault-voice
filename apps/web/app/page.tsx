@@ -75,7 +75,7 @@ export default function Dashboard() {
           <div className="card-head">
             <h2>In progress</h2>
             <Badge tone="live" pulse>
-              {call.locale === "es" ? "Spanish" : "English"}
+              Live
             </Badge>
           </div>
           <div className="live-body">
@@ -138,10 +138,7 @@ export default function Dashboard() {
           <a key={call.record.id} href={`/calls/${call.record.id}`} className="row">
             <span className="row-time tabular">{clockTime(call.record.startedAt)}</span>
             <span className="row-main">
-              <span className="row-title">
-                {call.callerName}
-                {call.locale === "es" && <Badge tone="muted">ES</Badge>}
-              </span>
+              <span className="row-title">{call.callerName}</span>
               <span className="row-sub">{call.summary}</span>
             </span>
             <OutcomeBadge outcome={call.record.outcome} />
