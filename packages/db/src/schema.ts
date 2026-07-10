@@ -1,0 +1,306 @@
+import {
+  BookingStatusSchema,
+  CallOutcomeSchema,
+  CallStateSchema,
+  EscalationReasonSchema,
+  LocaleSchema,
+  OutcomeClassificationSchema,
+  OutcomeSourceSchema,
+  SLOT_KEYS,
+  UrgencySchema,
+} from "@ledgerline/contracts";
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgEnum,
+  pgTable,
+  primaryKey,
+  real,
+  smallint,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from "drizzle-orm/pg-core";
+
+/**
+ * The data model from plan.md §7.
+ *
+ * **Every enum here is spread from a Zod schema in `@ledgerline/contracts`, not
+ * retyped.** `contracts` is the spine, and a hand-written `pgEnum` that says
+ * `'SOON'` while `UrgencySchema` has moved on is a silent production bug of
+ * exactly the kind defining these shapes once is supposed to eliminate. Adding a
+ * variant to a contract enum and forgetting the migration now fails at
+ * `drizzle-kit generate`, not at 2am.
+ *
+ * Four columns make principles #3 and #5 real, and without them we would be
+ * asserting reliability rather than measuring it:
+ *
+ *   - `slots.confirmed_by_caller` — the read-back actually happened.
+ *   - `outcomes.corrected_fields` — ground truth. The raw diff.
+ *   - `outcomes.classification`   — was the edit ours, a business change, or an
+ *     enrichment? Written by Step 6's nightly pass. **Never destructive.**
+ *   - `outcomes.human_label`      — the weekly 10% audit, published beside the
+ *     correction rate. An unaudited classifier grading our own homework is
+ *     marketing with extra steps.
+ */
+
+/** `z.enum(...).options` is a readonly tuple; pgEnum wants a mutable one. */
+const variants = <T extends string>(options: readonly [T, ...T[]]): [T, ...T[]] => [
+  ...options,
+];
+
+export const localeEnum = pgEnum("locale", variants(LocaleSchema.options));
+export const urgencyEnum = pgEnum("urgency", variants(UrgencySchema.options));
+export const callStateEnum = pgEnum("call_state", variants(CallStateSchema.options));
+export const callOutcomeEnum = pgEnum("call_outcome", variants(CallOutcomeSchema.options));
+export const slotKeyEnum = pgEnum("slot_key", variants(SLOT_KEYS));
+export const bookingStatusEnum = pgEnum("booking_status", variants(BookingStatusSchema.options));
+export const outcomeSourceEnum = pgEnum("outcome_source", variants(OutcomeSourceSchema.options));
+export const outcomeClassificationEnum = pgEnum(
+  "outcome_classification",
+  variants(OutcomeClassificationSchema.options),
+);
+export const escalationReasonEnum = pgEnum(
+  "escalation_reason",
+  variants(EscalationReasonSchema.options),
+);
+export const crmProviderEnum = pgEnum("crm_provider", ["housecall_pro", "jobber"]);
+
+/* -------------------------------------------------------------------------- */
+/* Tenant configuration                                                        */
+/* -------------------------------------------------------------------------- */
+
+export const tenants = pgTable("tenants", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  /** IANA zone. Every appointment window is rendered through it. */
+  timezone: text("timezone").notNull(),
+  trade: text("trade").notNull(),
+  crmProvider: crmProviderEnum("crm_provider").notNull(),
+  /** Encrypted at the application boundary. Never selected into a log line. */
+  crmCredentials: text("crm_credentials_enc").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const phoneNumbers = pgTable(
+  "phone_numbers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    e164: text("e164").notNull(),
+    twilioSid: text("twilio_sid").notNull(),
+  },
+  (table) => [uniqueIndex("phone_numbers_e164_key").on(table.e164)],
+);
+
+/** "Do we even serve this address." GeoJSON polygon, checked before booking. */
+export const serviceAreas = pgTable("service_areas", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
+  geojsonPolygon: jsonb("geojson_polygon").notNull(),
+});
+
+export const businessHours = pgTable(
+  "business_hours",
+  {
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    /** 0 = Sunday, matching `Date.prototype.getDay`. */
+    dow: smallint("dow").notNull(),
+    /** Local wall clock, `HH:MM`. Resolved against `tenants.timezone`. */
+    open: text("open").notNull(),
+    close: text("close").notNull(),
+    emergencyAfterHours: boolean("emergency_after_hours").notNull().default(false),
+  },
+  (table) => [primaryKey({ columns: [table.tenantId, table.dow] })],
+);
+
+export const jobTypes = pgTable("job_types", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
+  name: text("name").notNull(),
+  durationMinutes: integer("duration_minutes").notNull(),
+  requiresPhoto: boolean("requires_photo").notNull().default(false),
+  emergencyEligible: boolean("emergency_eligible").notNull().default(false),
+});
+
+/* -------------------------------------------------------------------------- */
+/* Calls                                                                       */
+/* -------------------------------------------------------------------------- */
+
+export const calls = pgTable(
+  "calls",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    fromE164: text("from_e164").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    localesDetected: localeEnum("locales_detected").array().notNull().default([]),
+    /** Null while the call is still in flight. Such calls are never scored. */
+    outcome: callOutcomeEnum("outcome"),
+    /** Booked with no human involvement. Derived, never hand-set. */
+    containment: boolean("containment").notNull().default(false),
+    recordingUrl: text("recording_url"),
+    transcriptUrl: text("transcript_url"),
+  },
+  (table) => [index("calls_tenant_started_idx").on(table.tenantId, table.startedAt)],
+);
+
+/**
+ * Per-turn trace, emitted in production from day one (principle #5).
+ *
+ * `barge_in` and `turn_take_ok` are named for Full-Duplex-Bench-v3's
+ * definitions, so our figures are comparable to the literature rather than
+ * merely internally consistent.
+ */
+export const callTurns = pgTable(
+  "call_turns",
+  {
+    callId: uuid("call_id")
+      .notNull()
+      .references(() => calls.id),
+    idx: integer("idx").notNull(),
+    role: text("role").notNull(),
+    state: callStateEnum("state").notNull(),
+    text: text("text").notNull(),
+    firstWordLatencyMs: integer("first_word_latency_ms"),
+    turnLatencyMs: integer("turn_latency_ms"),
+    bargeIn: boolean("barge_in").notNull().default(false),
+    turnTakeOk: boolean("turn_take_ok").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.callId, table.idx] })],
+);
+
+export const slots = pgTable(
+  "slots",
+  {
+    callId: uuid("call_id")
+      .notNull()
+      .references(() => calls.id),
+    key: slotKeyEnum("key").notNull(),
+    value: jsonb("value").notNull(),
+    /** The extractor's self-reported confidence, 0..1. A weak signal, recorded
+     * anyway: calibrating it against the eval corpus is what decides whether
+     * `if_low_confidence` read-backs are worth their extra turn. */
+    confidence: real("confidence").notNull(),
+    /**
+     * The caller heard this value read back and said yes. Principle #3 is a
+     * claim about the world, and this column is the only evidence for it.
+     */
+    confirmedByCaller: boolean("confirmed_by_caller").notNull().default(false),
+    validatorResult: jsonb("validator_result").notNull(),
+    /** Bumped each time the caller corrects this slot mid-call. */
+    revision: integer("revision").notNull().default(0),
+  },
+  (table) => [primaryKey({ columns: [table.callId, table.key] })],
+);
+
+export const escalations = pgTable("escalations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  callId: uuid("call_id")
+    .notNull()
+    .references(() => calls.id),
+  reason: escalationReasonEnum("reason").notNull(),
+  triggeredAt: timestamp("triggered_at", { withTimezone: true }).notNull(),
+  transferredTo: text("transferred_to"),
+  /** Null means a hazard transfer nobody picked up. Alert on it. */
+  humanAckAt: timestamp("human_ack_at", { withTimezone: true }),
+});
+
+/* -------------------------------------------------------------------------- */
+/* Bookings                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/** Nothing is written to the CRM during a call. This is what the call emits. */
+export const pendingBookings = pgTable("pending_bookings", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  callId: uuid("call_id")
+    .notNull()
+    .references(() => calls.id),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
+  /** A `PendingBookingPayload`, parsed on the way in and on the way out. */
+  payload: jsonb("payload").notNull(),
+  status: bookingStatusEnum("status").notNull().default("PENDING"),
+  workflowRunId: text("workflow_run_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const bookings = pgTable("bookings", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  pendingBookingId: uuid("pending_booking_id")
+    .notNull()
+    .references(() => pendingBookings.id),
+  crmJobId: text("crm_job_id").notNull(),
+  crmCustomerId: text("crm_customer_id").notNull(),
+  committedAt: timestamp("committed_at", { withTimezone: true }).notNull(),
+  /** How many of `POLL_OFFSETS_MS` have run. Drives `nextDuePoll`. */
+  completedPolls: smallint("completed_polls").notNull().default(0),
+});
+
+/**
+ * The CRM's copy of a job, over time.
+ *
+ * This table exists because change detection is **polled, not webhooked**.
+ * Webhook support differs across vendors and delivery is at-most-once, and a
+ * missed webhook silently reports a 0% correction rate — exactly the number a
+ * dishonest vendor would report. A metric whose failure mode is "looks perfect"
+ * must not depend on at-most-once delivery (plan, §7).
+ */
+export const jobSnapshots = pgTable(
+  "job_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    bookingId: uuid("booking_id")
+      .notNull()
+      .references(() => bookings.id),
+    polledAt: timestamp("polled_at", { withTimezone: true }).notNull(),
+    /** The vendor's body, verbatim. Retained forever so anyone can recount. */
+    payload: jsonb("payload").notNull(),
+  },
+  (table) => [index("job_snapshots_booking_idx").on(table.bookingId, table.polledAt)],
+);
+
+/**
+ * Ground truth. The only number that matters, and the one nobody publishes.
+ *
+ * `classification` and `human_label` are nullable because they are *derived*:
+ * the raw `corrected_fields` diff is written by the poller and never rewritten.
+ * Step 6's nightly model pass fills `classification`; a weekly 10% human audit
+ * fills `human_label`. We publish their agreement rate beside the correction
+ * rate, because a model asked whether a contractor's edit was its own fault has
+ * an obvious bias.
+ */
+export const outcomes = pgTable(
+  "outcomes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    bookingId: uuid("booking_id")
+      .notNull()
+      .references(() => bookings.id),
+    cancelled: boolean("cancelled").notNull().default(false),
+    /** Slot key → the contractor's fixed value. Never destructively updated. */
+    correctedFields: jsonb("corrected_fields").notNull().default({}),
+    source: outcomeSourceEnum("source").notNull(),
+    classification: outcomeClassificationEnum("classification"),
+    classifiedBy: text("classified_by"),
+    humanLabel: outcomeClassificationEnum("human_label"),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [index("outcomes_booking_idx").on(table.bookingId, table.observedAt)],
+);

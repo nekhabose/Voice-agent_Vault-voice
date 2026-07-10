@@ -380,7 +380,12 @@ const OUTCOMES: readonly BookingOutcome[] = BOOKED.map((call, index) => ({
   cancelled: false,
   correctedFields:
     index === 1 ? { service_address: "4120 Ponce de Leon Blvd Apt 2" } : {},
-  source: index === 1 ? "CONTRACTOR_DASHBOARD" : "CRM_WEBHOOK",
+  // We poll rather than trust a webhook: a missed webhook reports a 0%
+  // correction rate, which is exactly the number a dishonest vendor publishes.
+  source: index === 1 ? "CONTRACTOR_DASHBOARD" : "CRM_POLL",
+  // Written by Step 6's nightly triage pass, and audited weekly by a human.
+  classification: null,
+  humanLabel: null,
   observedAt: "2026-07-08T18:30:00.000Z",
 }));
 

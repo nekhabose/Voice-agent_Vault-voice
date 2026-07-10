@@ -32,11 +32,51 @@ const ok = (body: unknown): HttpResponse => ({ status: 200, body });
 /* Fake back ends                                                              */
 /* -------------------------------------------------------------------------- */
 
+/** What Housecall Pro answers for `GET /jobs/job_1`, as we booked it. */
+const HOUSECALL_JOB = {
+  id: "job_1",
+  work_status: "scheduled",
+  description: "Water heater leaking into the garage",
+  schedule: { scheduled_start: WINDOW.startsAt, scheduled_end: WINDOW.endsAt },
+  address: {
+    street: ADDRESS.line1,
+    street_line_2: null,
+    city: ADDRESS.city,
+    state: ADDRESS.state,
+    zip: ADDRESS.postalCode,
+  },
+  customer: { first_name: "Rosa", last_name: "Delgado", mobile_number: "(305) 555-1234" },
+};
+
+/** The same job, as Jobber answers it. */
+const JOBBER_JOB = {
+  id: "job_1",
+  jobStatus: "upcoming",
+  startAt: WINDOW.startsAt,
+  endAt: WINDOW.endsAt,
+  instructions: "Water heater leaking into the garage",
+  client: {
+    firstName: "Rosa",
+    lastName: "Delgado",
+    phones: [{ number: "(305) 555-1234" }],
+  },
+  property: {
+    address: {
+      street1: ADDRESS.line1,
+      street2: null,
+      city: ADDRESS.city,
+      province: ADDRESS.state,
+      postalCode: ADDRESS.postalCode,
+    },
+  },
+};
+
 function housecallHandler(existingCustomer: boolean): FakeHandler {
   return (req) => {
     if (req.method === "GET" && req.path.startsWith("/customers?")) {
       return ok({ customers: existingCustomer ? [{ id: "cust_existing" }] : [] });
     }
+    if (req.method === "GET" && req.path.startsWith("/jobs/")) return ok(HOUSECALL_JOB);
     if (req.method === "POST" && req.path === "/customers") return ok({ id: "cust_new" });
     if (req.method === "POST" && req.path.endsWith("/addresses")) return ok({ id: "addr_1" });
     if (req.method === "POST" && req.path === "/jobs") return ok({ id: "job_1" });
@@ -54,6 +94,8 @@ function operationOf(body: unknown): string {
 function jobberHandler(existingCustomer: boolean): FakeHandler {
   return (req) => {
     switch (operationOf(req.body)) {
+      case "JobById":
+        return ok({ data: { job: JOBBER_JOB } });
       case "ClientsByPhone":
         return ok({
           data: { clients: { nodes: existingCustomer ? [{ id: "cl_existing" }] : [] } },
@@ -83,13 +125,31 @@ interface Harness {
 
 type HarnessFactory = (handler: FakeHandler) => Harness;
 
-const HARNESSES: Record<string, { make: HarnessFactory; handler: (existing: boolean) => FakeHandler }> = {
+interface HarnessSpec {
+  readonly make: HarnessFactory;
+  readonly handler: (existing: boolean) => FakeHandler;
+  /**
+   * How this vendor spells "the contractor cancelled the job", and how it
+   * spells "the contractor deleted it". Two vocabularies, one outcome — that
+   * translation is precisely what the adapter is for, so the shared suite
+   * supplies the vendor words and asserts on our own.
+   */
+  readonly cancelledJob: FakeHandler;
+  readonly deletedJob: FakeHandler;
+  /** A job body carrying nothing but an id — the vendor renamed every field. */
+  readonly unparseableJob: FakeHandler;
+}
+
+const HARNESSES: Record<string, HarnessSpec> = {
   "Housecall Pro": {
     make: (h) => {
       const transport = new FakeTransport(h);
       return { adapter: new HousecallProAdapter(transport), transport };
     },
     handler: housecallHandler,
+    cancelledJob: () => ok({ ...HOUSECALL_JOB, work_status: "pro canceled" }),
+    deletedJob: () => ({ status: 404, body: { error: "not found" } }),
+    unparseableJob: () => ok({ id: "job_1" }),
   },
   Jobber: {
     make: (h) => {
@@ -97,6 +157,11 @@ const HARNESSES: Record<string, { make: HarnessFactory; handler: (existing: bool
       return { adapter: new JobberAdapter(transport), transport };
     },
     handler: jobberHandler,
+    // Jobber has no job deletion, so `revokeJob` archives — and an archived job
+    // is what a cancelled booking reads back as.
+    cancelledJob: () => ok({ data: { job: { ...JOBBER_JOB, jobStatus: "archived" } } }),
+    deletedJob: () => ok({ data: { job: null } }),
+    unparseableJob: () => ok({ data: { job: { id: "job_1" } } }),
   },
 };
 
@@ -136,6 +201,96 @@ describe.each(Object.entries(HARNESSES))("CrmAdapter contract: %s", (_name, spec
       CTX,
     );
     expect(job.id).toBeTruthy();
+  });
+
+  it("reads a job back in our vocabulary, not the vendor's", async () => {
+    const { adapter } = happy(false);
+    const snapshot = await adapter.readJob({ id: "job_1" }, CTX);
+
+    expect(snapshot).toMatchObject({
+      jobId: "job_1",
+      status: "SCHEDULED",
+      description: "Water heater leaking into the garage",
+      window: { startsAt: WINDOW.startsAt, endsAt: WINDOW.endsAt },
+      address: {
+        line1: ADDRESS.line1,
+        city: ADDRESS.city,
+        state: ADDRESS.state,
+        postalCode: ADDRESS.postalCode,
+      },
+      customer: { name: "Rosa Delgado", phone: "(305) 555-1234" },
+    });
+  });
+
+  it("never reports the geocoder's own output as if the CRM had returned it", async () => {
+    const { adapter } = happy(false);
+    const snapshot = await adapter.readJob({ id: "job_1" }, CTX);
+
+    // `formatted`, `lat`, `lng` are principle #3's output, not any vendor's.
+    // A snapshot that carried them would diff against the booking we sent and
+    // report a corrected address on every single job.
+    expect(snapshot.address).not.toHaveProperty("formatted");
+    expect(snapshot.address).not.toHaveProperty("lat");
+    expect(snapshot.address).not.toHaveProperty("lng");
+  });
+
+  it("keeps the vendor payload verbatim, so anyone can recount", async () => {
+    const { adapter } = happy(false);
+    const snapshot = await adapter.readJob({ id: "job_1" }, CTX);
+    expect(snapshot.raw).toBeTruthy();
+  });
+
+  it("reports a cancelled job as CANCELLED whatever the vendor calls it", async () => {
+    const { adapter } = spec.make(spec.cancelledJob);
+    const snapshot = await adapter.readJob({ id: "job_1" }, CTX);
+    expect(snapshot.status).toBe("CANCELLED");
+  });
+
+  it("reports a deleted job as DELETED, not as an error", async () => {
+    // Housecall Pro answers 404; Jobber answers `data.job: null`. Both mean the
+    // booking did not survive contact with the contractor, which is ground
+    // truth rather than a fault.
+    const { adapter } = spec.make(spec.deletedJob);
+    const snapshot = await adapter.readJob({ id: "job_1" }, CTX);
+
+    expect(snapshot.status).toBe("DELETED");
+    expect(snapshot.address).toBeNull();
+    expect(snapshot.window).toBeNull();
+    expect(snapshot.description).toBeNull();
+  });
+
+  it("throws on an outage rather than reporting a clean job", async () => {
+    // The single most dangerous bug in this package would be swallowing a 503
+    // here: the poller would record "no corrections" and the published
+    // reliability number would be a perfect score computed from an outage.
+    const { adapter } = spec.make(() => ({ status: 503, body: null }));
+    await expect(adapter.readJob({ id: "job_1" }, CTX)).rejects.toMatchObject({
+      name: "CrmError",
+      retryable: true,
+    });
+  });
+
+  it("throws when the transport dies mid-poll", async () => {
+    const { adapter } = spec.make(() => {
+      throw new Error("ECONNRESET");
+    });
+    await expect(adapter.readJob({ id: "job_1" }, CTX)).rejects.toMatchObject({
+      retryable: true,
+    });
+  });
+
+  it("degrades a renamed vendor field to null, never to a correction", async () => {
+    // A field we cannot parse was not observed. Reporting it as changed would
+    // let a vendor's schema change read as an agent that suddenly got
+    // everything wrong.
+    const { adapter } = spec.make(spec.unparseableJob);
+    const snapshot = await adapter.readJob({ id: "job_1" }, CTX);
+
+    expect(snapshot.status).toBe("SCHEDULED");
+    expect(snapshot.window).toBeNull();
+    expect(snapshot.description).toBeNull();
+    expect(snapshot.address).toBeNull();
+    expect(snapshot.customer).toEqual({ name: null, phone: null });
   });
 
   it("revokes a job without caring how the vendor spells it", async () => {
@@ -240,6 +395,29 @@ describe("HousecallProAdapter", () => {
     await adapter.revokeJob({ id: "job_1" }, CTX);
     expect(transport.requests[0]).toMatchObject({ method: "DELETE", path: "/jobs/job_1" });
   });
+
+  it.each([
+    ["canceled", "CANCELLED"],
+    // Matched on a substring, so a cancellation flavour we have not seen lands
+    // as CANCELLED rather than silently as SCHEDULED. Under-reporting a
+    // cancellation is the error that flatters us.
+    ["pro canceled", "CANCELLED"],
+    ["completed", "COMPLETED"],
+    ["in progress", "SCHEDULED"],
+    ["needs scheduling", "SCHEDULED"],
+  ])("maps work_status %s to %s", async (workStatus, expected) => {
+    const { adapter } = make(() => ok({ ...HOUSECALL_JOB, work_status: workStatus }));
+    expect((await adapter.readJob({ id: "job_1" }, CTX)).status).toBe(expected);
+  });
+
+  it("carries line2 through only when the vendor sent one", async () => {
+    const { adapter } = make(() =>
+      ok({ ...HOUSECALL_JOB, address: { ...HOUSECALL_JOB.address, street_line_2: "Apt 2" } }),
+    );
+    expect((await adapter.readJob({ id: "job_1" }, CTX)).address).toMatchObject({
+      line2: "Apt 2",
+    });
+  });
 });
 
 describe("name splitting", () => {
@@ -327,6 +505,43 @@ describe("JobberAdapter", () => {
   it("rejects a body with neither data nor errors", async () => {
     const { adapter } = make(() => ok({}));
     await expect(adapter.upsertCustomer(CUSTOMER, CTX)).rejects.toThrow(/no data/);
+  });
+
+  it.each([
+    ["archived", "CANCELLED"],
+    ["requires_invoicing", "COMPLETED"],
+    ["completed", "COMPLETED"],
+    ["upcoming", "SCHEDULED"],
+    ["late", "SCHEDULED"],
+  ])("maps jobStatus %s to %s", async (jobStatus, expected) => {
+    const { adapter } = make(() => ok({ data: { job: { ...JOBBER_JOB, jobStatus } } }));
+    expect((await adapter.readJob({ id: "job_1" }, CTX)).status).toBe(expected);
+  });
+
+  it("reads the description from instructions, never from the truncated title", async () => {
+    // `createJob` writes `title: description.slice(0, 100)`. Diffing on the
+    // title would report a corrected problem description on every booking whose
+    // description ran long.
+    const long = "x".repeat(150);
+    const { adapter } = make(() =>
+      ok({ data: { job: { ...JOBBER_JOB, title: long.slice(0, 100), instructions: long } } }),
+    );
+    expect((await adapter.readJob({ id: "job_1" }, CTX)).description).toBe(long);
+  });
+
+  it("reads the client's first phone number", async () => {
+    const { adapter } = make(jobberHandler(false));
+    expect((await adapter.readJob({ id: "job_1" }, CTX)).customer.phone).toBe("(305) 555-1234");
+  });
+
+  it("survives a client with no phones array at all", async () => {
+    const { adapter } = make(() =>
+      ok({ data: { job: { ...JOBBER_JOB, client: { firstName: "Rosa" } } } }),
+    );
+    expect((await adapter.readJob({ id: "job_1" }, CTX)).customer).toEqual({
+      name: "Rosa",
+      phone: null,
+    });
   });
 });
 

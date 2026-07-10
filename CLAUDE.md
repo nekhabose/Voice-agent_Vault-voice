@@ -97,9 +97,10 @@ packages/
   safety/        Deterministic emergency classifier. No LLM dependency.
   validators/    Phone, address (geocoder port), service area, business hours.
   extraction/    The Anthropic slot extractor. One tool, one field, one turn.
-  crm/           CrmAdapter interface + Housecall Pro + Jobber.
-  workflows/     Saga engine + post-call booking transaction.
+  crm/           CrmAdapter interface + Housecall Pro + Jobber. Writes and reads.
+  workflows/     Saga engine + post-call booking transaction + the outcome poller.
   telemetry/     Reliability metrics + latency/turn-taking budgets.
+  db/            Drizzle schema + migrations. Schema only — no client, no pool.
   eval/          Simulated-caller harness. Scenarios run in CI.
 apps/
   web/           Next.js contractor dashboard.
@@ -112,12 +113,21 @@ contracts ──► conversation ──► validators ──► eval
     │              │               ▲            ▲
     ├──► safety ───┼───────────────┘────────────┘
     ├──► extraction ─────────────────────────────┘  (eval binds it at Step 5.1)
-    ├──► crm ──► workflows
-    └──► telemetry ──► web
+    ├──► crm ──► workflows ┄┄► telemetry            (┄ = test-only)
+    ├──► telemetry ──► web
+    └──► db
 ```
 
 `extraction` depends on `contracts` alone, and nothing depends on `extraction` yet. The only
 model SDK in the tree lives there, and it stays there.
+
+`db` depends on `contracts` alone, and nothing depends on `db`. Every `pgEnum` is spread
+from a Zod schema rather than retyped, so the tables cannot drift from the domain.
+
+`workflows ┄┄► telemetry` is a **devDependency**, and the only test-only edge in the tree.
+`outcomes.test.ts` drives a hand-edited job body through the real adapter, the real poller,
+and the real `computeMetrics()` — the one place the whole wedge is exercised end to end.
+Do not promote it to a runtime dependency.
 
 `contracts` depends on nothing. Nothing depends on `web`. There are no cycles —
 keep it that way.
@@ -231,7 +241,30 @@ fastest model in the benchmark had the worst turn-take rate.
 
 Ground truth is `outcomes.correctedFields`: every booking the contractor edits or
 cancels is a labeled failure. It is the only number that matters and nobody
-publishes it.
+publishes it. `packages/workflows/src/outcomes.ts` computes it, and four rules
+keep it honest:
+
+- **Polled, never webhooked.** Webhook delivery is at-most-once, and a missed
+  webhook reports a 0% correction rate — exactly the number a dishonest vendor
+  would report. A metric whose failure mode is *looks perfect* must not depend on
+  lossy delivery. `CRM_WEBHOOK` was removed from `OutcomeSourceSchema` for this
+  reason; do not add it back.
+- **A failed poll emits nothing.** `readJob` throws on a `429`/`5xx`/dead socket,
+  and `observeOutcome` lets it. Swallowing an outage and recording "no
+  corrections" is the missed webhook again, wearing a different hat.
+- **Absence is never a correction.** Every field on `CrmJobSnapshot` is nullable.
+  A vendor that stops returning `description` has told us nothing about whether
+  the contractor edited it.
+- **Half of `diffBooking` is refusing to report corrections that never
+  happened.** `+13055551234` vs `(305) 555-1234`, `Z` vs `-04:00`, `33135` vs
+  `33135-2841`, a CRM title-casing a name — each of these is a *false* failure
+  that makes our published number worse than the truth. Each has a test. And
+  `CrmJobSnapshot.address` is an `AddressInput` precisely so the geocoder's
+  `formatted` cannot reach the comparison and mark every booking wrong.
+
+The poller reads and never writes: `OutcomeDeps.crm` is
+`Pick<CrmAdapter, "readJob">`, so a metric that repairs the thing it measures
+does not compile.
 
 ---
 
@@ -266,15 +299,16 @@ publishes it.
 
 ## Testing
 
-439 tests, 98.8% line coverage, thresholds enforced in `vitest.config.ts`.
+526 tests, 98.99% line coverage, thresholds enforced in `vitest.config.ts`.
 
 | Layer | Where | What it proves |
 |---|---|---|
 | Schema invariants | `contracts` | The graph is connected, terminal states have no successor, every slot has both a spec and an extraction schema |
 | Unit | `conversation`, `safety`, `validators` | Slot mechanics, hazard precision/recall, phone/address/window rules |
 | Replay | `extraction` | Committed model responses driven through the **real** `SLOT_SPECS`. **Zero live model calls** — the SDK's `fetch` is injected. A suite whose green depends on a third party's uptime teaches the team to ignore red |
-| Contract | `crm` | **One suite, both adapters.** If it passes for Housecall Pro and Jobber, the interface is not a rename of one vendor's endpoints |
-| Integration | `workflows` | The booking saga, including the forced `create_job` failure and its compensating rollback |
+| Contract | `crm` | **One suite, both adapters.** If it passes for Housecall Pro and Jobber, the interface is not a rename of one vendor's endpoints. `readJob` is asserted in our vocabulary against each vendor's |
+| Drift | `db` | Every `pgEnum` equals its Zod source. No database is touched; that needs Neon |
+| Integration | `workflows` | The booking saga, including the forced `create_job` failure and its compensating rollback. And the outcome poller — a hand-edited job body through the real adapter, the real diff, and the real `computeMetrics()` |
 | End-to-end | `eval` | Simulated callers through the real machine, classifier, and validators |
 
 ### Rules
@@ -283,11 +317,16 @@ publishes it.
   `readBacks` precisely because asserting the final *value* would also pass a
   system that silently kept a stale confirmation.
 - **Mutation-test the invariants that matter.** Break the thing, confirm the
-  suite screams, revert. Six are verified: revoking confirmation on correction
-  (caught in 3 places); in-phrase fuzzy matching (drops recall to 0.974); and, in
-  `extraction`, dropping `thinking: {type:"disabled"}`, skipping the Zod
-  re-validation of the model's output, interpolating a per-call value into the
-  cached prompt prefix, and widening `UrgencySchema` in `contracts`.
+  suite screams, revert. Thirteen are verified: revoking confirmation on
+  correction (caught in 3 places); in-phrase fuzzy matching (drops recall to
+  0.974); in `extraction`, dropping `thinking: {type:"disabled"}`, skipping the
+  Zod re-validation of the model's output, interpolating a per-call value into
+  the cached prompt prefix, and widening `UrgencySchema` in `contracts`; and, in
+  the outcome pipeline, swallowing a `503` in `readJob`, treating an unreported
+  field as a correction, counting outcome rows instead of bookings (caught in 2
+  places), reading Jobber's truncated `title` instead of `instructions`,
+  comparing `postalCode` exactly, comparing phone numbers as strings, and
+  restoring `CRM_WEBHOOK` to the contract.
 - The emergency classifier reports precision **and** recall over a labeled
   bilingual corpus every run (38 hazards, 28 routine calls). `recall === 1.0` is
   asserted. Precision is currently 1.0, with 3 documented deliberate false
@@ -310,16 +349,24 @@ Stated plainly, because a README that implies otherwise is marketing.
   *silently*). See `plan.md` Step 1, surprises #4 and #5.
 - **`eval` still uses its own inline extractor stub.** `FakeExtractor` exists and
   nothing binds it yet; that is task 5.1, left undone rather than half-done.
-- **Nothing produces `BookingOutcome[]`.** `computeMetrics()` (`metrics.ts:41`)
-  accepts the contractor's later edits and cancellations as ground truth, and no
-  code emits them. Since that number *is* the wedge, `CrmAdapter.readJob` plus a
-  polling outcome pipeline is Step 2 in `plan.md` §9 — before telephony, not after.
+- **`readJob` has never spoken to a live CRM.** `observeOutcome()` now produces
+  the `BookingOutcome[]` that `computeMetrics()` consumes, and the whole path is
+  exercised end to end — but through `FakeTransport`, against a job body edited by
+  hand. No Housecall Pro sandbox credential exists. The vendor status
+  vocabularies (`work_status`, `jobStatus`) and the deleted-job responses (`404`,
+  `data.job: null`) are transcribed from documentation, not observed. Task 4.10
+  verifies them, and Step 2's exit criterion, where the credential first exists.
+- **Nothing schedules the poller.** `pollSchedule()` and `nextDuePoll()` say when
+  a booking is due; no cron calls them, and `bookings.completed_polls` is a column
+  nobody increments. That needs the database and Vercel WDK — Step 7.
 - **No telephony, no LiveKit, no realtime model.** The `Effect[]` type is the seam
   the voice runtime binds to. The plan puts the agent worker in Python; the core
   is TypeScript and pure, so it can drive either through a typed boundary.
-- **No database.** The data model in `plan.md` is not yet Drizzle schema.
-  `apps/web/lib/demo-data.ts` seeds the dashboard and is typed against the real
-  contracts, so the UI cannot drift.
+- **No database, only its schema.** `packages/db` is Drizzle tables and a
+  generated migration — no client, no pool, no query helpers, because
+  `drizzle-kit generate` needs no database and nothing else in the tree has one.
+  The migration has never been applied. `apps/web/lib/demo-data.ts` still seeds
+  the dashboard and is typed against the real contracts, so the UI cannot drift.
 - **No auth, no multi-tenancy, no billing.** Step 7.
 - **`eval` does not run over real SIP.** It answers "given what the caller said,
   does the system do the right thing?" The latency and barge-in numbers that are
@@ -351,10 +398,51 @@ Stated plainly, because a README that implies otherwise is marketing.
 - `zonedParts` uses `Intl` rather than a date library. DST and offset history are
   already in the platform, and a bad appointment window is a truck on the wrong
   day.
+- `packages/db` enums are spread from Zod with a `variants()` helper, because
+  `z.enum(...).options` is a *readonly* tuple and `pgEnum` wants a mutable one.
+  Widen `Object.values(schema)` to `unknown[]` before drizzle's `is(v, PgTable)`
+  can narrow it — the module's exact table types are not assignable to the
+  generic `PgTable`.
+- `drizzle-kit generate` reads the schema and needs no `DATABASE_URL`. Regenerate
+  the migration in the same commit as a schema change; `migrate` and `push` are
+  the ones that want Neon.
+- Adding a variant to a contract enum without regenerating the migration is
+  caught by `db/src/schema.test.ts`, not by `tsc`.
 
 ---
 
 ## Change log
+
+- **Step 2 — `CrmAdapter.readJob` + the outcome pipeline.** *(526 tests, 98.99% coverage,
+  typecheck clean, `apps/web` builds.)* The wedge, made computable. `readJob` on both
+  adapters behind one shared contract suite; `packages/workflows/src/outcomes.ts` with
+  `diffBooking`, the 24h/72h/7d schedule, and a `SnapshotStore` port; `packages/db` with
+  the §7 tables and a generated migration. `CRM_WEBHOOK` retired from
+  `OutcomeSourceSchema` in favour of `CRM_POLL`.
+
+  **Three boundaries moved.** First, `CrmJobSnapshot` deliberately omits `urgency` and
+  `jobTypeId`: Housecall Pro tags urgency, Jobber has no field for it, and a field only
+  one adapter can report biases the correction rate *by provider*. That is
+  "never add a method only one adapter can implement" applied to a field. Second,
+  `OutcomeDeps.crm` is `Pick<CrmAdapter, "readJob">` — the poller observes and must never
+  write, and now cannot. Third, `workflows` gained a **devDependency** on `telemetry`, the
+  tree's only test-only edge, so the wedge is exercised end to end in one place.
+
+  **The surprise was that most of the work is refusing to report corrections that never
+  happened.** A naive diff flags a corrected address on every booking (`formatted` is the
+  geocoder's, not the CRM's), a corrected phone on every booking, a reschedule whenever a
+  vendor returns `-04:00` instead of `Z`, and a corrected ZIP on every ZIP+4 enrichment.
+  The mirror-image bug — an unparsed field read as unchanged rather than unobserved —
+  flatters us instead. Both directions have tests.
+
+  **And `computeMetrics()` had a latent bug that only real outcomes could expose.** Three
+  polls per booking meant `countCorrected()` counted rows, so `correctionRate` could
+  exceed `1.0` — a value `ReliabilityMetricsSchema` rejects. It now counts distinct
+  bookings, latest `observedAt` wins. The metric had never met its own data; that is what
+  Step 2 was for.
+
+  **Unverified, and named:** `readJob` has never spoken to a live CRM. The vendor status
+  vocabularies are transcribed from docs. Task 4.10.
 
 - **Step 1 — `packages/extraction`.** *(439 tests, 98.84% coverage, typecheck clean,
   `apps/web` builds.)* The Anthropic slot extractor, behind the new `SlotExtractor`

@@ -74,9 +74,24 @@ export function computeMetrics(input: MetricsInput): ReliabilityMetrics {
  * A booking is "corrected" if the contractor cancelled it or edited any field.
  * Either way we got it wrong; counting them separately would let us report the
  * flattering half.
+ *
+ * **Counted per booking, not per outcome.** The poller re-reads each job at 24h,
+ * 72h, and 7d, so one corrected booking arrives as up to three `BookingOutcome`
+ * rows. Counting rows would put `correctionRate` above 1.0 — a number that
+ * `ReliabilityMetricsSchema` rejects and that no reader would believe. The
+ * latest observation wins: a contractor who fixed an address and then cancelled
+ * outright has told us the booking failed once.
  */
 function countCorrected(outcomes: readonly BookingOutcome[]): number {
-  return outcomes.filter(
+  const latest = new Map<string, BookingOutcome>();
+  for (const outcome of outcomes) {
+    const seen = latest.get(outcome.bookingId);
+    if (!seen || Date.parse(outcome.observedAt) >= Date.parse(seen.observedAt)) {
+      latest.set(outcome.bookingId, outcome);
+    }
+  }
+
+  return [...latest.values()].filter(
     (o) => o.cancelled || Object.keys(o.correctedFields).length > 0,
   ).length;
 }

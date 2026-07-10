@@ -1,5 +1,5 @@
 {
-  "name": "@ledgerline/workflows",
+  "name": "@ledgerline/db",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -8,11 +8,14 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "generate": "drizzle-kit generate"
+  },
   "dependencies": {
     "@ledgerline/contracts": "*",
-    "@ledgerline/crm": "*"
+    "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
-    "@ledgerline/telemetry": "*"
+    "drizzle-kit": "^0.31.0"
   }
 }

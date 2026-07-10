@@ -8,6 +8,7 @@ import {
   type CrmAdapter,
   type CrmCustomerRef,
   type CrmJobRef,
+  type CrmJobSnapshot,
   type CrmLocationRef,
   type CustomerInput,
   type JobInput,
@@ -72,6 +73,20 @@ class SpyCrm implements CrmAdapter {
   async createJob(_input: JobInput): Promise<CrmJobRef> {
     this.enter("createJob");
     return { id: "job_1" };
+  }
+
+  /** The booking saga never reads. `outcomes.test.ts` exercises this path. */
+  async readJob(ref: CrmJobRef): Promise<CrmJobSnapshot> {
+    this.enter("readJob");
+    return {
+      jobId: ref.id,
+      status: "SCHEDULED",
+      window: null,
+      description: null,
+      address: null,
+      customer: { name: null, phone: null },
+      raw: {},
+    };
   }
 
   async revokeJob(): Promise<void> {

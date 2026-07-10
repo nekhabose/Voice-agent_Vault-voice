@@ -40,7 +40,9 @@ const outcome = (o: Partial<BookingOutcome>): BookingOutcome => ({
   bookingId: uuid(),
   cancelled: false,
   correctedFields: {},
-  source: "CRM_WEBHOOK",
+  source: "CRM_POLL",
+  classification: null,
+  humanLabel: null,
   observedAt: "2026-07-09T09:00:00.000Z",
   ...o,
 });
@@ -151,6 +153,57 @@ describe("computeMetrics — correction rate", () => {
       committedBookings: 2,
     });
     expect(metrics.correctionRate).toBe(0);
+  });
+
+  it("counts one booking once, however many times the poller saw it", () => {
+    // The poller re-reads every job at 24h, 72h, and 7d, so one corrected
+    // booking arrives as three outcome rows. Counting rows would put
+    // correctionRate at 3.0 — a value ReliabilityMetricsSchema rejects outright.
+    const bookingId = uuid();
+    const corrected = { service_address: "1249 Calle Ocho" };
+    const metrics = computeMetrics({
+      calls: [],
+      turns: [],
+      outcomes: [
+        outcome({ bookingId, correctedFields: corrected, observedAt: "2026-07-10T09:00:00.000Z" }),
+        outcome({ bookingId, correctedFields: corrected, observedAt: "2026-07-12T09:00:00.000Z" }),
+        outcome({ bookingId, correctedFields: corrected, observedAt: "2026-07-16T09:00:00.000Z" }),
+      ],
+      committedBookings: 1,
+    });
+    expect(metrics.correctionRate).toBe(1);
+  });
+
+  it("believes the latest poll, not the first", () => {
+    // The 24h poll found the job clean; by 7d the contractor had cancelled it.
+    // Keeping the earlier observation would report a booking that never failed.
+    const bookingId = uuid();
+    const metrics = computeMetrics({
+      calls: [],
+      turns: [],
+      outcomes: [
+        outcome({ bookingId, observedAt: "2026-07-10T09:00:00.000Z" }),
+        outcome({ bookingId, cancelled: true, observedAt: "2026-07-16T09:00:00.000Z" }),
+      ],
+      committedBookings: 1,
+    });
+    expect(metrics.correctionRate).toBe(1);
+  });
+
+  it("does not let a stale poll un-fail a booking", () => {
+    // Same two observations, delivered out of order. `observedAt` decides, not
+    // array position — a cron does not guarantee ordering.
+    const bookingId = uuid();
+    const metrics = computeMetrics({
+      calls: [],
+      turns: [],
+      outcomes: [
+        outcome({ bookingId, cancelled: true, observedAt: "2026-07-16T09:00:00.000Z" }),
+        outcome({ bookingId, observedAt: "2026-07-10T09:00:00.000Z" }),
+      ],
+      committedBookings: 1,
+    });
+    expect(metrics.correctionRate).toBe(1);
   });
 });
 

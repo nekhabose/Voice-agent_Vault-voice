@@ -8,8 +8,8 @@ An English-language inbound-call voice agent for US home-services contractors �
 built to work on models that fail the benchmark, and to tell you exactly how
 often it gets it right.
 
-[![tests](https://img.shields.io/badge/tests-391_passing-1a7a47)](#verification)
-[![coverage](https://img.shields.io/badge/coverage-98.8%25-1a7a47)](#verification)
+[![tests](https://img.shields.io/badge/tests-526_passing-1a7a47)](#verification)
+[![coverage](https://img.shields.io/badge/coverage-99.0%25-1a7a47)](#verification)
 [![typecheck](https://img.shields.io/badge/typecheck-strict-0f6d68)](#verification)
 [![emergency recall](https://img.shields.io/badge/emergency_recall-1.00-b3261e)](#the-emergency-classifier-does-not-ask-a-model-for-permission)
 
@@ -261,17 +261,21 @@ Three details that are easy to get wrong, and are tested:
 Reliability claims in this space are mostly unfalsifiable marketing. These are not.
 
 ```
- ✓ contracts/contracts.test.ts   (30)   graph connectivity, slot registry invariants
+ ✓ contracts/contracts.test.ts    (32)  graph connectivity, slot registry invariants
  ✓ conversation/slot-book.test.ts (36)  fills, confidence, confirmation, backtracking
  ✓ conversation/machine.test.ts   (33)  transitions, guards, emergency interrupts
  ✓ safety/classifier.test.ts      (83)  precision AND recall over a labeled corpus
+ ✓ safety/english-only-pivot.test  (8)  the hazard lexicon stays bilingual
  ✓ validators/validators.test.ts  (64)  E.164, geocoding, polygons, timezones, DST
- ✓ crm/crm.test.ts                (53)  ONE contract suite, run against BOTH adapters
- ✓ workflows/booking.test.ts      (28)  saga, rollback, crash-resume, retry backoff
- ✓ telemetry/metrics.test.ts      (25)  percentiles, budgets, the latency/silence trade
+ ✓ extraction/extraction.test.ts  (46)  replayed model responses, ZERO live model calls
+ ✓ crm/crm.test.ts                (83)  ONE contract suite, run against BOTH adapters
+ ✓ workflows/booking.test.ts      (27)  saga, rollback, crash-resume, retry backoff
+ ✓ workflows/outcomes.test.ts     (28)  the correction diff, and the false corrections
+ ✓ telemetry/metrics.test.ts      (28)  percentiles, budgets, the latency/silence trade
+ ✓ db/schema.test.ts              (26)  the tables, and that no enum drifted from Zod
  ✓ eval/eval.test.ts              (32)  simulated callers, end to end
 
- Tests  391 passed        Coverage  98.8% lines / 95.4% branches
+ Tests  526 passed        Coverage  99.0% lines / 94.3% branches
 ```
 
 A few of these are load-bearing:
@@ -293,6 +297,9 @@ customer is orphaned.
 | --- | --- |
 | Correction no longer revokes confirmation | **3 tests fail** — unit, machine, and end-to-end |
 | Remove in-phrase fuzzy matching (`gas leek`) | **5 tests fail** — emergency recall drops to 0.974 |
+| `readJob` swallows a `503` and reports a clean job | **1 test fails** — an outage must never publish a perfect score |
+| The correction diff counts an *unreported* field as corrected | **2 tests fail** — absence is not evidence |
+| `correctionRate` counts poll rows instead of bookings | **2 tests fail** — telemetry and end-to-end; the rate exceeds 1.0 |
 
 That first one is why `eval` records which slots were *read back* rather than only
 which values came out right. Asserting the final value would also pass a system
@@ -303,24 +310,26 @@ correction.
 
 ## Status
 
-Built and tested: the domain core, both CRM adapters, the booking transaction,
-the metrics, the eval harness, and the dashboard. **5.3k lines of source, 3.3k
-lines of tests, 13 simulated-caller scenarios.**
+Built and tested: the domain core, the Anthropic slot extractor, both CRM
+adapters, the booking transaction, the outcome poller, the metrics, the database
+schema, the eval harness, and the dashboard. **13 simulated-caller scenarios.**
 
 Not built, and deliberately not faked:
 
-- **Any LLM at all.** There is no model SDK in the dependency tree. The slot
-  extractor is a stub, and `packages/eval/src/simulate.ts:33` says so out loud:
-  extraction quality is a question you answer against audio, not one a
-  text-driven harness can honestly claim to have tested. `plan.md` §10.1
-  specifies the real one.
-- **The measurement that is supposedly the product.** `computeMetrics()` takes a
-  `BookingOutcome[]` — the contractor's later edits and cancellations — and
-  nothing emits it yet. Detecting those edits means polling the CRM and diffing.
-  It is Step 2 of the build, because a reliability claim you cannot compute is a slogan.
+- **Neither the model nor the CRM has ever answered for real.** The slot
+  extractor is real code against the real Anthropic SDK, and the outcome poller
+  is real code against both CRM adapters — but no credential for either has ever
+  existed in this repo. Both are driven by injected transports and hand-authored
+  fixtures. What they prove is that a contract change breaks the caller. What
+  they cannot prove is what `claude-sonnet-5` actually emits, or that Housecall
+  Pro's `work_status` really carries the values we map. Those are tasks 5.5 and
+  4.10, and they are written down rather than glossed.
+- **A scheduler for the poller.** `pollSchedule()` says when a booking is due to
+  be re-read at 24h, 72h, and 7d. No cron calls it yet.
 - **Telephony.** No Twilio, no LiveKit, no realtime model. `Effect[]` is the seam
   the voice runtime binds to.
-- **Persistence, auth, multi-tenancy, billing.** Step 7.
+- **A database.** `packages/db` is the Drizzle schema and a generated migration,
+  never applied. Auth, multi-tenancy, and billing are Step 7.
 - **`eval` over real SIP.** The harness answers *"given what the caller said, does
   the system do the right thing?"* The latency and barge-in numbers that are
   comparable to the literature need the SIP path.

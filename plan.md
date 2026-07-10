@@ -8,29 +8,33 @@
 
 ---
 
-## Current status (verified 2026-07-09, after Step 1)
+## Current status (verified 2026-07-09, after Step 2)
 
 The domain core is built and green. Everything below was re-run, not copied from a previous claim.
 
 | Check | Result |
 |---|---|
-| `npm test` | **439 passed**, 11 files |
+| `npm test` | **526 passed**, 13 files |
 | `npm run typecheck` | clean |
-| `npm run test:coverage` | **98.84%** lines (thresholds: 90/90/85/90) |
+| `npm run test:coverage` | **98.99%** lines (thresholds: 90/90/85/90) |
 | `cd apps/web && npm run build` | builds, 3 routes |
 
 **Built.** `contracts`, `conversation` (SlotBook + the seven-state machine), `safety`
 (deterministic classifier, labeled corpus, `recall === 1.0`), `validators`, `extraction`
 (the Anthropic slot extractor behind the `SlotExtractor` port), `crm`
-(Housecall Pro + Jobber behind one contract suite), `workflows` (saga + compensating
-rollback), `telemetry` (Full-Duplex-Bench-comparable definitions + CI budgets), `eval`
-(simulated callers), `apps/web` (dashboard).
+(Housecall Pro + Jobber behind one contract suite, now including `readJob`), `workflows`
+(saga + compensating rollback + the outcome poller), `telemetry`
+(Full-Duplex-Bench-comparable definitions + CI budgets), `db` (Drizzle schema + the initial
+migration), `eval` (simulated callers), `apps/web` (dashboard).
 
-**Not built.** No telephony, no realtime model, no database, no auth, no billing, no
-compliance work. `AnthropicExtractor` exists but has never spoken to a live model — it is
-tested entirely against committed fixtures, and `packages/eval/src/simulate.ts` still binds
-its own inline stub rather than the real extractor (Step 5.1).
-`computeMetrics()` accepts a `BookingOutcome[]` that nothing currently produces.
+**Not built.** No telephony, no realtime model, no auth, no billing, no compliance work.
+`AnthropicExtractor` exists but has never spoken to a live model — it is tested entirely
+against committed fixtures, and `packages/eval/src/simulate.ts` still binds its own inline
+stub rather than the real extractor (Step 5.1). The `db` schema has never been applied to a
+Postgres: `drizzle-kit generate` needs no database and `migrate` does, and no Neon instance
+exists (Step 7). **`observeOutcome()` now produces the `BookingOutcome[]` that
+`computeMetrics()` consumes, but it has only ever read a `FakeTransport`** — no live
+Housecall Pro sandbox has been polled (task 4.10).
 
 ### Progress board
 
@@ -42,8 +46,8 @@ person to open this file will trust it, and be wrong.
 |---|---|---|
 | 0 | Pivot cleanup | ✅ **Done** — 2026-07-09 |
 | 1 | `packages/extraction` — the LLM slot extractor | ✅ **Done** — 2026-07-09 |
-| 2 | `CrmAdapter.readJob` + the outcome pipeline | ⬜ Not started ← **next** |
-| 3 | Utterance generation (build time) | ⬜ Not started |
+| 2 | `CrmAdapter.readJob` + the outcome pipeline | ✅ **Done** — 2026-07-09 |
+| 3 | Utterance generation (build time) | ⬜ Not started ← **next** |
 | 4 | `apps/agent` — one live call | ⬜ Not started |
 | 5 | Eval over the real path | ⬜ Not started |
 | 6 | Correction triage + FAQ | ⬜ Not started |
@@ -54,9 +58,15 @@ person to open this file will trust it, and be wrong.
 Not on the critical path, and unresolved: the `AgenticArm` A/B (§11), and
 `claude-haiku-4-5` vs `claude-sonnet-5` for extraction, scored on critical-slot accuracy.
 
-**Two questions Step 1 could not settle without a credential, and Step 5 must:** whether the
-prompt-cache prefix is even large enough to cache (§10.1), and whether the committed fixtures
-match what `claude-sonnet-5` actually returns. Both are called out in Step 1's notes below.
+**Three questions no step so far could settle without a credential.** Steps 1 and 2 each
+built the real code against the real interface and hand-authored the fixtures, because no
+vendor account existed. Named so they cannot be quietly forgotten:
+
+- Whether the prompt-cache prefix is large enough to cache at all (§10.1) — **task 5.5**.
+- Whether the committed extraction fixtures match what `claude-sonnet-5` actually emits —
+  **task 5.5**.
+- Whether Housecall Pro's `work_status` and Jobber's `jobStatus` carry the values `readJob`
+  maps, and whether a deleted job really answers `404` / `data.job: null` — **task 4.10**.
 
 ---
 
@@ -262,10 +272,10 @@ ledgerline/
 │   ├── safety/                 Emergency classifier (no LLM dependency)
 │   ├── validators/             Phone, address, service area, business hours
 │   ├── extraction/             LLM slot extractor behind SlotExtractor port        ✅
-│   ├── crm/                    CrmAdapter + Housecall Pro + Jobber
-│   ├── workflows/              Saga engine + post-call booking transaction
+│   ├── crm/                    CrmAdapter + Housecall Pro + Jobber + readJob       ✅
+│   ├── workflows/              Saga + booking transaction + outcome poller         ✅
 │   ├── telemetry/              Reliability metrics + latency budgets
-│   ├── db/                     Drizzle schema + migrations (Neon)                  [Step 2]
+│   ├── db/                     Drizzle schema + migrations (Neon)                  ✅
 │   └── eval/                   Simulated-caller harness + scoring
 └── plan.md, idea.md, CLAUDE.md
 ```
@@ -511,28 +521,97 @@ to `FakeExtractor` is task 5.1 and was left there rather than half-done here.
 
 ---
 
-### Step 2 — `CrmAdapter.readJob` + the outcome pipeline (4–5 days)
+### Step 2 — `CrmAdapter.readJob` + the outcome pipeline ✅ **Done (2026-07-09)**
 
-The wedge, made real. Do this **before** telephony: it is the claim, and a reliability claim you
+The wedge, made real. Done **before** telephony: it is the claim, and a reliability claim you
 cannot compute is a slogan.
 
-| # | Task | Detail |
-|---|---|---|
-| 2.1 | Design `readJob` against Housecall Pro **and** Jobber, on paper | Before implementing either. `CLAUDE.md` warns: never add a method only one adapter can implement. |
-| 2.2 | `readJob(ref, ctx): Promise<CrmJobSnapshot>` | `packages/crm/src/types.ts`. |
-| 2.2b | Add `CRM_POLL` to `BookingOutcomeSchema.source` | `contracts/src/booking.ts:68` still offers only `CRM_WEBHOOK \| CONTRACTOR_DASHBOARD \| MANUAL_AUDIT`. We poll. Retire `CRM_WEBHOOK` once nothing emits it. |
-| 2.3 | Implement in both adapters | `housecall.ts`, `jobber.ts`. |
-| 2.4 | Extend the shared contract suite | `packages/crm/src/crm.test.ts`. One suite, both adapters. |
-| 2.5 | `packages/db` — Drizzle schema | §7. Include `job_snapshots` and the four `outcomes` columns. |
-| 2.6 | Outcome poller | 24h / 72h / 7d after commit. Diff snapshot vs `PendingBooking`. Emit `BookingOutcome` with `correctedFields`. |
-| 2.7 | Feed `computeMetrics()` real outcomes | Not fixtures. |
+| # | Task | Detail | |
+|---|---|---|---|
+| 2.1 | Design `readJob` against Housecall Pro **and** Jobber, on paper | Done first. The design is the doc comment on `CrmJobSnapshot`; three of its decisions are surprises #1–#3 below. | ✅ |
+| 2.2 | `readJob(ref, ctx): Promise<CrmJobSnapshot>` | `packages/crm/src/types.ts`. Shared parsing in the new `snapshot.ts`. | ✅ |
+| 2.2b | `CRM_POLL` in `BookingOutcomeSchema.source` | Added, and **`CRM_WEBHOOK` retired** — nothing emitted it, and leaving it there invites someone to wire one up and silently under-report. `classification` and `humanLabel` added as nullable, mirroring §7. | ✅ |
+| 2.3 | Implement in both adapters | `housecall.ts` (REST, `404` = deleted), `jobber.ts` (GraphQL, `data.job: null` = deleted). | ✅ |
+| 2.4 | Extend the shared contract suite | 8 new shared cases, run against both adapters, plus vendor-specific status-mapping tables. | ✅ |
+| 2.5 | `packages/db` — Drizzle schema | 13 tables, `job_snapshots`, the four columns, and the initial migration — `drizzle-kit generate` needs no database. | ✅ |
+| 2.6 | Outcome poller | `workflows/src/outcomes.ts`. 24h / 72h / 7d, `diffBooking`, `SnapshotStore`. | ✅ |
+| 2.7 | Feed `computeMetrics()` real outcomes | And fix the bug that surfaced when they arrived — surprise #5. | ✅ |
 
-**Exit:** `computeMetrics()` returns a `correctionRate` derived from a real Housecall Pro
-sandbox job that you edited by hand. That number is the first thing this company has that
-nobody else does.
+**Exit (partially met, and the gap is named).** `computeMetrics()` returns a `correctionRate`
+derived from a Housecall Pro job body **edited by hand and served through `FakeTransport`**,
+driven end-to-end through the real adapter, the real poller, and the real `computeMetrics()`.
+Only the credential is fake. A *live* sandbox has never been polled — that is **task 4.10**,
+where the credential first exists. Step 1 set this precedent with its hand-authored fixtures,
+and the honest thing is to say so rather than to claim the sandbox.
 
-Correction triage (call site #5) is **deferred to Step 6** — you need corrections before you can
-classify them, and the raw diff is what matters.
+**Result:** 526 tests (was 439), 98.99% coverage, typecheck clean, `apps/web` builds.
+
+**Mutation-tested, all seven caught:** swallowing a `503` in `readJob` and reporting a clean
+job; treating an unreported field as a correction; counting outcome *rows* instead of bookings;
+reading Jobber's truncated `title` instead of `instructions`; comparing `postalCode` exactly, so
+ZIP+4 enrichment reads as our error; comparing phone numbers as strings; and putting
+`CRM_WEBHOOK` back in the contract.
+
+#### Five things came out different from what this Step predicted
+
+1. **`urgency` cannot be diffed, and pretending otherwise would bias the number we publish.**
+   Housecall Pro stores urgency as a job tag; Jobber has nowhere to put it at all. A field only
+   one adapter can report is a field whose correction rate differs by provider for reasons that
+   have nothing to do with the agent. `DIFFABLE_SLOTS` is therefore five keys, not six, and
+   `jobTypeId` goes the same way. This is `CLAUDE.md`'s "never add a method only one adapter can
+   implement" applied to a *field* rather than a method, and it is the reason 2.1 had to happen
+   before 2.2.
+
+2. **A deleted job is an outcome, not an error.** Both vendors can lose a job entirely —
+   Housecall Pro answers `404`, Jobber answers `data.job: null` inside a `200`. Throwing on
+   either would make the poller retry forever against a job that no longer exists, and the
+   contractor deleting our booking is the loudest possible correction signal. Hence
+   `CrmJobStatus.DELETED`, and a `deletedSnapshot()` whose every field is `null` — we know the
+   booking died, and we know nothing about what its fields looked like when it did. Reporting
+   those nulls as corrections would double-count the cancellation.
+
+3. **Half the work is *not* reporting corrections that never happened.** This was the surprise.
+   The naive diff reports a corrected address on every booking (`formatted` is our geocoder's
+   output and no CRM echoes it), a corrected phone on every booking (`+13055551234` vs
+   `(305) 555-1234`), a corrected name whenever the CRM title-cases, a reschedule whenever the
+   vendor returns `-04:00` instead of `Z`, and a corrected ZIP whenever the CRM enriches to
+   ZIP+4. Every one of those is a *false* failure that would make our published number worse
+   than the truth — and the mirror-image bug, treating an unparsed field as unchanged rather
+   than unobserved, makes it better. `diffBooking` has a test for each, and the type system
+   forbids the first: `CrmJobSnapshot.address` is an `AddressInput`, so `formatted` cannot
+   reach the comparison.
+
+4. **`OutcomeDeps.crm` is `Pick<CrmAdapter, "readJob">`, and the narrowing is load-bearing.**
+   The poller observes; it never writes. Typing it that way means a future edit that
+   "helpfully" re-syncs a corrected field back into the CRM does not compile. A metric that
+   repairs the thing it measures measures nothing.
+
+5. **`computeMetrics()` had a latent bug that only real outcomes could expose.** Three polls per
+   booking means one corrected booking arrives as up to three `BookingOutcome` rows.
+   `countCorrected()` counted rows, so `correctionRate` would have exceeded `1.0` — a value
+   `ReliabilityMetricsSchema` rejects outright, which means the dashboard would have crashed
+   rather than lied. It now counts distinct bookings, latest observation wins, ordered by
+   `observedAt` rather than array position because a cron guarantees no ordering. **This is what
+   Step 2 was for.** The metric had never met its own data.
+
+**Also settled, and worth not re-litigating:**
+
+- **A failed poll emits nothing.** `readJob` throws on a `429`/`5xx`/dead socket and
+  `observeOutcome` lets it. Catching it and recording "no corrections observed" is the same lie
+  as §7's missed webhook, arrived at more honestly: a metric whose failure mode is *looks
+  perfect* must not depend on lossy delivery. Two tests, one per adapter, plus one on the poller.
+- **The raw payload is stored before the diff runs.** A bug in `diffBooking` then costs a wrong
+  label rather than the evidence, which is what lets Step 6's classification stay a derived
+  column that anyone can recount.
+- **`packages/db` ships schema only** — no pool, no client, no query helpers. Nothing in the tree
+  has a database, and a connection nobody opens is a lie about what is built.
+
+**Found, deferred:** the vendor status vocabularies (`work_status`, `jobStatus`) are transcribed
+from documentation, not observed. Task **4.10** verifies them, and the exit criterion above,
+against a live sandbox.
+
+Correction triage (call site #5) remains **deferred to Step 6** — you need corrections before you
+can classify them, and the raw diff is what matters.
 
 ---
 
@@ -565,6 +644,7 @@ Now the hardware. Everything above is already tested.
 | 4.7 | Google Address Validation behind the existing `Geocoder` port | |
 | 4.8 | Hangup → `PendingBooking` → WDK workflow → Housecall Pro job → Twilio SMS | `commitBooking()` does not change. |
 | 4.9 | Telemetry: every turn traced | |
+| 4.10 | **Verify `readJob` against a live Housecall Pro sandbox** | The Step 2 exit criterion, with a real credential. Book a job, edit its address by hand, poll it, assert `correctionRate`. Confirm `work_status` and `jobStatus` really carry the values the adapters map, and that a deleted job really answers `404` / `data.job: null`. Both vocabularies are transcribed from docs, not observed. |
 
 **Exit criteria — the first live-call gate.** 20 consecutive scripted-but-live calls from real phones.
 ≥18 book a correct job. **Zero wrong addresses committed.** p95 first-word latency < 1.2s, p95
@@ -939,11 +1019,13 @@ they look like dead code. They are not. See principle #4, and Step 0.5.
 ~~Step 0 — pivot cleanup.~~ Done 2026-07-09.
 ~~Step 1 — `packages/extraction`.~~ Done 2026-07-09. Read its five surprises before you touch
 the extractor; #1 and #4 changed the contracts and the exit criterion respectively.
+~~Step 2 — `readJob` and the outcome pipeline.~~ Done 2026-07-09. Read its five surprises before
+you touch `diffBooking`; #3 is the one that would quietly corrupt the number we publish.
 
-1. **Step 2 — `readJob` and the outcome pipeline.** ← you are here. Design it against both CRMs
-   on paper before writing either. This is the wedge; everything else is table stakes. Don't
-   forget task 2.2b.
-2. **Step 3 — utterance generation**, then **Step 4 — telephony.**
+1. **Step 3 — utterance generation.** ← you are here. Two days, and the AI disclosure it commits
+   is a compliance requirement rather than a preference.
+2. **Step 4 — telephony.** Don't forget task 4.10: it closes Step 2's exit criterion against a
+   real credential.
 
 Do not start with telephony. It is the most visible part and the least uncertain.
 
