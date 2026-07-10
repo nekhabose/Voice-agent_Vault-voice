@@ -7,6 +7,7 @@
  * production bugs; defining them in one place eliminates it structurally.
  */
 export * from "./effects.js";
+export * from "./http.js";
 export * from "./ports.js";
 export * from "./primitives.js";
 export * from "./slots.js";

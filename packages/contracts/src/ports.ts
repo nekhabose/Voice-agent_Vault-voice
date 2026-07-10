@@ -3,8 +3,10 @@
  * package for a two-line interface, and so tests never depend on ambient
  * global state.
  */
+import type { PendingBookingPayload } from "./booking.js";
 import type { Effect } from "./effects.js";
 import type { SlotKey, SlotValueMap } from "./slots.js";
+import type { EscalationReason } from "./states.js";
 
 /** Injected so nothing in the system reads the wall clock directly. */
 export interface Clock {
@@ -92,6 +94,65 @@ export interface UtteranceContext {
  */
 export interface Utterer {
   say(effect: Effect, ctx: UtteranceContext): Promise<string>;
+}
+
+/* -------------------------------------------------------------------------- */
+/* The voice runtime                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What came of speaking one sentence to the caller.
+ *
+ * Returned rather than discarded because principle #5's budgets are computed
+ * from exactly these three numbers, and only the layer that actually spoke can
+ * know them. `plan.md` §10.3 sketched `perform(effects): Promise<void>`; a
+ * `void` return leaves `CallTurn.turnTakeOk` with nowhere to come from, and
+ * `turnTakeOk` is the metric that catches the failure mode Full-Duplex-Bench-v3
+ * found in the *fastest* model in its field — silence.
+ */
+export interface SpeechOutcome {
+  /**
+   * The agent produced audio at all. Gemini Live said nothing in 22 of 100
+   * scenarios; `checkBudgets()` blocks a merge below 96% here.
+   */
+  readonly spoke: boolean;
+  /** The agent talked over the caller. */
+  readonly bargeIn: boolean;
+  /** End-of-caller-speech to agent's first word. Null when nothing was spoken. */
+  readonly firstWordLatencyMs: number | null;
+  /** End-of-caller-speech to end-of-agent-turn. Null when nothing was spoken. */
+  readonly turnLatencyMs: number | null;
+}
+
+/**
+ * The audio layer, reduced to the three things it can do that our own code
+ * cannot: make noise, hand the call to a human, and end it.
+ *
+ * `plan.md` §10.3 had this port emit `MachineEvent`. It cannot. A `SLOT_FILLED`
+ * event carries a value that has already been through `packages/validators` —
+ * the geocoder, the E.164 parse, the business-hours check. An audio layer that
+ * could construct one would have to own the geocoder, and principle #3 is that
+ * the geocoder decides what an address is, not the thing listening to the
+ * caller. So effects go down and *raw* speech comes back up; `CallRuntime` is
+ * the only thing that turns the second into the first.
+ */
+export interface VoiceSession {
+  /** Speak one sentence. Resolves when the agent's turn is over. */
+  say(text: string): Promise<SpeechOutcome>;
+  /** SIP REFER to a human. Only ever reached from an `ESCALATE` effect. */
+  transfer(reason: EscalationReason): Promise<void>;
+  hangUp(): Promise<void>;
+}
+
+/**
+ * Where a finished call posts its `PendingBooking`.
+ *
+ * Nothing is written to the contractor's CRM from inside the call (principle
+ * #3). This port reaches the control plane, which starts the durable workflow;
+ * it does not reach Housecall Pro, and it must never wait on one.
+ */
+export interface BookingSink {
+  submit(payload: PendingBookingPayload): Promise<void>;
 }
 
 /** Injected so retry backoff does not make the test suite slow. */

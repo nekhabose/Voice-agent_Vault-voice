@@ -115,7 +115,17 @@ export type MachineEvent =
   | { readonly type: "HAZARD_DETECTED"; readonly detection: HazardDetection }
   | { readonly type: "HAZARD_GUIDANCE_DELIVERED" }
   | { readonly type: "CALLER_REQUESTED_HUMAN" }
-  | { readonly type: "CALLER_HUNG_UP" };
+  | { readonly type: "CALLER_HUNG_UP" }
+  /**
+   * A dependency we own failed, and the caller is not at fault.
+   *
+   * `EscalationReason.AGENT_ERROR` and its catalog line ("Something's gone wrong
+   * on my end") both existed from day one with no event that could reach them.
+   * The extractor's `unavailable` outcome is what reaches them: an Anthropic
+   * outage, after one bounded retry, is a human's problem rather than a caller
+   * who gets asked their name a fourth time (plan, §10.3).
+   */
+  | { readonly type: "AGENT_ERROR"; readonly reason: string };
 
 export interface TransitionResult {
   readonly context: MachineContext;
@@ -250,6 +260,13 @@ function applyEvent(
 
     case "CALLER_REQUESTED_HUMAN":
       return { context: escalateNow(ctx, "CALLER_REQUESTED_HUMAN"), effects: escalationEffects("CALLER_REQUESTED_HUMAN"), rejection: null };
+
+    case "AGENT_ERROR":
+      return {
+        context: escalateNow(ctx, "AGENT_ERROR"),
+        effects: escalationEffects("AGENT_ERROR"),
+        rejection: null,
+      };
 
     case "CALLER_HUNG_UP":
       return {

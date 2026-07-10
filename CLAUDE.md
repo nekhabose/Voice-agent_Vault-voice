@@ -92,43 +92,67 @@ cd apps/web && npm run build   # also typechecks the app
 
 ```
 packages/
-  contracts/     Zod schemas. The spine. Slots, states, effects, bookings, traces, ports.
+  contracts/     Zod schemas. The spine. Slots, states, effects, bookings, traces, ports, HTTP.
   conversation/  SlotBook + the state machine. Pure, no I/O.
   safety/        Deterministic emergency classifier. No LLM dependency.
-  validators/    Phone, address (geocoder port), service area, business hours.
+  validators/    Phone, address (geocoder port + GoogleGeocoder), service area, business hours.
   extraction/    The Anthropic slot extractor. One tool, one field, one turn.
   utterance/     Everything the agent says. Committed catalog, decided before the call.
   crm/           CrmAdapter interface + Housecall Pro + Jobber. Writes and reads.
+  runtime/       CallRuntime. The Effect[] binding: caller ASR → machine → VoiceSession.
   workflows/     Saga engine + post-call booking transaction + the outcome poller.
   telemetry/     Reliability metrics + latency/turn-taking budgets.
   db/            Drizzle schema + migrations. Schema only — no client, no pool.
   eval/          Simulated-caller harness. Scenarios run in CI.
 apps/
   web/           Next.js contractor dashboard.
+  agent/         Python LiveKit worker scaffold + generated Pydantic. No hardware yet (Step 4.2/4.6).
 ```
 
 ### Dependency direction
 
 ```
 contracts ──► conversation ──► validators ──► eval
-    │              │               ▲            ▲
-    ├──► safety ───┼───────────────┘────────────┘
-    ├──► extraction ─────────────────────────────┘  (eval binds it at Step 5.1)
-    ├──► utterance ──────────────────────────────┘  (eval binds it at Step 4)
+    │              │               ▲   │        ▲
+    ├──► safety ───┼───────────────┘   │────────┘
+    ├──► extraction ───────────────────┼─────────┘  (eval binds it at Step 5.1; runtime binds it in tests)
+    ├──► utterance ────────────────────┤            (runtime binds it in tests)
     ├──► crm ──► workflows ┄┄► telemetry            (┄ = test-only)
+    ├──► runtime ┄┄► {extraction, utterance, telemetry}   (runtime deps: conversation, safety, validators)
     ├──► telemetry ──► web
     └──► db
 ```
 
-`extraction` depends on `contracts` alone, and nothing depends on `extraction` yet. The only
-model SDK in the tree lives there, and it stays there. `utterance` also depends on `contracts`
-alone — `LlmUtterer` reaches a model through a local `Phraser` port rather than importing the
-SDK, which is what keeps that sentence true.
+`extraction` depends on `contracts` alone. The only model SDK in the tree lives there, and it
+stays there — `runtime` binds a `SlotExtractor`, never `AnthropicExtractor` directly (it takes
+the port; tests inject `FakeExtractor`). `utterance` also depends on `contracts` alone —
+`LlmUtterer` reaches a model through a local `Phraser` port rather than importing the SDK.
+
+`runtime` is the Step 4 `Effect[]` binding. It depends on `contracts`, `conversation`, `safety`,
+and `validators` at runtime, and on `extraction`, `utterance`, and `telemetry` **as
+devDependencies only**: `CallRuntime` speaks to those three through ports (`SlotExtractor`,
+`Utterer`) or emits their shapes (`CallTurn`), so the real implementations are needed only to
+drive and score the tests. `runtime.test.ts` runs a whole call — real machine, real classifier,
+real validators, real `Effect[]` binding — against `FakeVoiceSession` and `FakeExtractor`, then
+scores it with the real `computeMetrics()` / `checkBudgets()`. Do not promote those three to
+runtime dependencies. Nothing depends on `runtime`; the Python worker (`apps/agent`) is its
+audio adapter across the language boundary, not a package importer.
+
+`HttpTransport` and `FetchTransport` live in `contracts`, not `crm`. Two packages speak HTTP to
+a vendor — `crm` (Housecall Pro, Jobber) and `validators` (Google Address Validation) — and a
+port crossing a package boundary belongs in the spine, exactly as `Effect` does. `crm/src/http.ts`
+was deleted in Step 4; the alternative (`validators` → `crm`) points the graph backwards.
 
 `Effect` and `EscalationAction` live in `contracts`, not `conversation`. Two things need them
 across a boundary: the `Utterer` port (which `contracts` owns), and the Python worker, whose
-Pydantic is generated from the Zod here at task 4.1. `machine.ts` re-exports them because it
-is where they are produced.
+Pydantic is generated from the Zod here (task 4.1: `contracts/src/codegen.ts` emits the JSON
+Schema, `apps/agent` turns it into `contracts.py`). `machine.ts` re-exports them because it is
+where they are produced.
+
+`VoiceSession` and `BookingSink` are the two Step 4 ports the runtime performs against. The
+`VoiceSession` **speaks and returns a `SpeechOutcome`** (`say`/`transfer`/`hangUp`); it does
+**not** emit `MachineEvent`, because a `SLOT_FILLED` carries a geocoder- and validator-checked
+value that only `CallRuntime` can construct (principle #3). Effects go down, raw speech comes up.
 
 `db` depends on `contracts` alone, and nothing depends on `db`. Every `pgEnum` is spread
 from a Zod schema rather than retyped, so the tables cannot drift from the domain.
@@ -330,15 +354,16 @@ does not compile.
 
 ## Testing
 
-575 tests, 99.08% line coverage, thresholds enforced in `vitest.config.ts`.
+611 tests, 99.18% line coverage, thresholds enforced in `vitest.config.ts`.
 
 | Layer | Where | What it proves |
 |---|---|---|
-| Schema invariants | `contracts` | The graph is connected, terminal states have no successor, every slot has both a spec and an extraction schema, every `Effect` parses |
-| Unit | `conversation`, `safety`, `validators` | Slot mechanics, hazard precision/recall, phone/address/window rules |
+| Schema invariants | `contracts` | The graph is connected, terminal states have no successor, every slot has both a spec and an extraction schema, every `Effect` parses. And the worker JSON Schema is byte-current with the Zod — the codegen drift guard |
+| Unit | `conversation`, `safety`, `validators` | Slot mechanics, hazard precision/recall, phone/address/window rules, and `GoogleGeocoder`'s status→outcome mapping against transcribed wire shapes |
 | Review surface | `utterance` | The catalog is data, not template functions; every slot has an ask and a read-back; the AI disclosure is byte-for-byte what it was; `LlmUtterer` refuses to reword anything but `ASK_FOR` |
 | Replay | `extraction` | Committed model responses driven through the **real** `SLOT_SPECS`. **Zero live model calls** — the SDK's `fetch` is injected. A suite whose green depends on a third party's uptime teaches the team to ignore red |
 | Contract | `crm` | **One suite, both adapters.** If it passes for Housecall Pro and Jobber, the interface is not a rename of one vendor's endpoints. `readJob` is asserted in our vocabulary against each vendor's |
+| Runtime | `runtime` | A whole call driven through the **real** machine, classifier, validators, and `Effect[]` binding against `FakeVoiceSession` — greeting/disclosure first, out-of-order-safe read-backs, correction revokes confirmation, extraction outage retries then escalates as `AGENT_ERROR`, hazard on an ASR partial short-circuits before the extractor, and every turn traced so `checkBudgets()` scores it (silence breaches `turnTakeRate`) |
 | Drift | `db` | Every `pgEnum` equals its Zod source. No database is touched; that needs Neon |
 | Integration | `workflows` | The booking saga, including the forced `create_job` failure and its compensating rollback. And the outcome poller — a hand-edited job body through the real adapter, the real diff, and the real `computeMetrics()` |
 | End-to-end | `eval` | Simulated callers through the real machine, classifier, and validators |
@@ -395,9 +420,27 @@ Stated plainly, because a README that implies otherwise is marketing.
 - **Nothing schedules the poller.** `pollSchedule()` and `nextDuePoll()` say when
   a booking is due; no cron calls them, and `bookings.completed_polls` is a column
   nobody increments. That needs the database and Vercel WDK — Step 7.
-- **No telephony, no LiveKit, no realtime model.** The `Effect[]` type is the seam
-  the voice runtime binds to. The plan puts the agent worker in Python; the core
-  is TypeScript and pure, so it can drive either through a typed boundary.
+- **The `Effect[]` binding is built and tested, but only against fakes.**
+  `packages/runtime`'s `CallRuntime` drives a whole call — greeting through
+  booking — through the real machine, classifier, and validators, and it is the
+  seam the voice runtime binds to. What it has never had is a real microphone.
+  **No telephony, no LiveKit room, no SIP trunk, no realtime model.** `apps/agent`
+  is an honest Python scaffold: a README, a `pyproject.toml`, and the Effect
+  dispatch worker, with a `FakeVoiceSession` standing in for audio. Tasks 4.2 (Twilio
+  → SIP → LiveKit) and 4.6 (GPT-Realtime behind `apps/agent/voice/`) wire it to
+  hardware. The 20-live-call exit gate is **not met and cannot be** without a
+  vendor credential.
+- **`GoogleGeocoder` has never spoken to a live Google endpoint.** It is real code
+  behind the `Geocoder` port, driven in tests through an injected `HttpTransport`
+  against response bodies transcribed from Google's docs — the same precedent as
+  the extractor's hand-authored fixtures. What its status→outcome mapping does with
+  a *real* Google response is unverified; that is a 4.10-class gap.
+- **The Pydantic half of the worker codegen has never run.** `contracts/src/codegen.ts`
+  emits the JSON Schema from the Zod and a test fails the build if the committed
+  `apps/agent/contracts.schema.json` drifts — that half is offline and guarded.
+  Turning it into `contracts.py` needs `datamodel-code-generator`, a Python tool
+  this environment cannot install (PEP 668). `contracts.py` is `.gitignore`d because
+  it is a generated artifact.
 - **Nothing has ever spoken an utterance out loud.** `packages/utterance` renders
   strings; no TTS engine has read one, so the prosody of "305 555 1234" is a
   guess. And **no lawyer has read `AI_DISCLOSURE`** — it is committed and pinned,
@@ -459,10 +502,54 @@ Stated plainly, because a README that implies otherwise is marketing.
   the ones that want Neon.
 - Adding a variant to a contract enum without regenerating the migration is
   caught by `db/src/schema.test.ts`, not by `tsc`.
+- `CallRuntime` arms **exactly one slot per turn** — the machine's focus slot.
+  Out-of-order fills and multi-state advances live in `SlotBook`/`machine.ts`, but
+  the extractor is only ever asked the one focused slot. Do not "optimise" it into
+  extracting several fields per utterance: that is the sequential-tool-call task
+  VoiceAgentBench shows models failing, and principle #1 is enforced at this layer
+  too, not just in the tool schema.
+- `runtime`'s `validateSlot` and `eval/src/simulate.ts`'s `toEvent` both dispatch a
+  raw extraction to the three validators. **Not duplicates to merge:** `toEvent`
+  also builds a `MachineEvent` for a text-driven harness, and the two pull apart the
+  moment either changes. The validator *set* is the contract; a new one is a compile
+  error in both.
+- Regenerate `apps/agent/contracts.schema.json` with `npm run gen:contracts` in the
+  same commit as any change to `Effect` or `PendingBooking`; `contracts/src/codegen.test.ts`
+  fails the build otherwise. `contracts.py` is a generated, `.gitignore`d artifact —
+  never hand-edit it (plan, §10.4).
 
 ---
 
 ## Change log
+
+- **Step 4 (core) — `packages/runtime` + `apps/agent` scaffold + codegen.** *(611 tests, 99.18%
+  coverage, typecheck clean, `apps/web` builds.)* The `Effect[]` binding, made real and testable
+  without a phone. `CallRuntime` drives a whole call — greeting and the AI disclosure first, then
+  extract-one-slot-per-turn, read-back-and-confirm, correction that revokes a confirmation, an
+  outage that retries once and then escalates as `AGENT_ERROR`, a hazard on an ASR partial that
+  short-circuits the turn before the extractor is asked — and posts a `PendingBooking` to a
+  `BookingSink` on hangup. Every spoken and heard turn is a `CallTurn`, so `checkBudgets()` scores
+  the runtime's own output and a scripted silent turn breaches `turnTakeRate`. `GoogleGeocoder`
+  (task 4.7) ships behind the `Geocoder` port, tested against transcribed wire shapes. Task 4.1's
+  codegen emits the worker JSON Schema from the Zod with a PR-suite drift guard.
+
+  **Four boundaries moved, and every one is a principle.** *(1)* The `VoiceSession` port **speaks
+  and returns `SpeechOutcome`** rather than emitting `MachineEvent`: a validated `SLOT_FILLED` is
+  something only `CallRuntime` can build, because the geocoder decides what an address is, not the
+  audio layer (principle #3). *(2)* `HttpTransport`/`FetchTransport` moved from `crm` into
+  `contracts`, because `validators` now speaks HTTP too and `validators → crm` points the graph
+  backwards — a port crossing a package boundary belongs in the spine, exactly as `Effect` did.
+  *(3)* The `AGENT_ERROR` machine event was added: `EscalationReason.AGENT_ERROR` and its catalog
+  line existed with no event that could reach them, and the extractor's `unavailable` outcome now
+  does. *(4)* `runtime` depends on `extraction`, `utterance`, and `telemetry` as **devDependencies
+  only** — it takes their ports and emits their shapes, so the real implementations are needed only
+  to drive and score the tests.
+
+  **What is deliberately deferred, and named:** no telephony, no LiveKit, no realtime model, no
+  live Google, no live Housecall Pro. `apps/agent` is a documented scaffold; the 20-live-call exit
+  gate cannot be met without a vendor credential. The Pydantic half of the codegen needs a Python
+  tool this environment forbids (PEP 668); the JSON Schema it consumes is committed and guarded.
+  Tasks 4.2, 4.6, and 4.10 are the credentialed live work — same precedent as Steps 1–3.
 
 - **Step 3 — `packages/utterance`.** *(575 tests, 99.08% coverage, typecheck clean,
   `apps/web` builds.)* Everything the agent says, decided before the call: a committed

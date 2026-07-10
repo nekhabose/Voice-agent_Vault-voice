@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { fixedClock, type PendingBookingPayload } from "@ledgerline/contracts";
+import {
+  FakeTransport,
+  fixedClock,
+  type PendingBookingPayload,
+} from "@ledgerline/contracts";
 import {
   CrmError,
-  FakeTransport,
   HousecallProAdapter,
   type CrmJobSnapshot,
 } from "@ledgerline/crm";

@@ -8,15 +8,17 @@
 
 ---
 
-## Current status (verified 2026-07-09, after Step 3)
+## Current status (verified 2026-07-10, after Step 4's core)
 
-The domain core is built and green. Everything below was re-run, not copied from a previous claim.
+The domain core is built and green, and the call runtime that binds it to a voice
+session now exists and is tested end to end without a phone. Everything below was
+re-run, not copied from a previous claim.
 
 | Check | Result |
 |---|---|
-| `npm test` | **575 passed**, 14 files |
+| `npm test` | **611 passed**, 17 files |
 | `npm run typecheck` | clean |
-| `npm run test:coverage` | **99.08%** lines (thresholds: 90/90/85/90) |
+| `npm run test:coverage` | **99.18%** lines (thresholds: 90/90/85/90) |
 | `cd apps/web && npm run build` | builds, 3 routes |
 
 **Built.** `contracts`, `conversation` (SlotBook + the seven-state machine), `safety`
@@ -26,12 +28,21 @@ The domain core is built and green. Everything below was re-run, not copied from
 (saga + compensating rollback + the outcome poller), `telemetry`
 (Full-Duplex-Bench-comparable definitions + CI budgets), `db` (Drizzle schema + the initial
 migration), `utterance` (the committed catalog + `CachedUtterer` behind the `Utterer` port),
-`eval` (simulated callers), `apps/web` (dashboard).
+`runtime` (`CallRuntime` — the `Effect[]` binding, driving the machine from caller ASR through
+the extractor, classifier, and validators, tracing every turn, and posting the `PendingBooking`),
+`eval` (simulated callers), `apps/web` (dashboard). `validators` now also carries `GoogleGeocoder`
+behind the `Geocoder` port (Step 4.7), and `contracts` emits the worker's JSON Schema with a
+drift guard (Step 4.1).
 
-**Not built.** No telephony, no realtime model, no auth, no billing, no compliance work.
-`AnthropicExtractor` exists but has never spoken to a live model — it is tested entirely
-against committed fixtures, and `packages/eval/src/simulate.ts` still binds its own inline
-stub rather than the real extractor (Step 5.1). The `db` schema has never been applied to a
+**Not built.** No telephony, no realtime model, no auth, no billing, no compliance work. **The
+`Effect[]` seam is now bound and tested, but only against fakes** — `apps/agent` is an honest
+Python scaffold with no LiveKit room, no SIP trunk, and no GPT-Realtime (Step 4.2/4.6), and
+`CallRuntime` has never driven a real microphone. `GoogleGeocoder` has never spoken to a live
+Google endpoint, and the Pydantic half of the codegen has never run (no
+`datamodel-code-generator` in this environment). `AnthropicExtractor` exists but has never
+spoken to a live model — it is tested entirely against committed fixtures, and
+`packages/eval/src/simulate.ts` still binds its own inline stub rather than the real extractor
+(Step 5.1). The `db` schema has never been applied to a
 Postgres: `drizzle-kit generate` needs no database and `migrate` does, and no Neon instance
 exists (Step 7). **`observeOutcome()` now produces the `BookingOutcome[]` that
 `computeMetrics()` consumes, but it has only ever read a `FakeTransport`** — no live
@@ -51,7 +62,7 @@ person to open this file will trust it, and be wrong.
 | 1 | `packages/extraction` — the LLM slot extractor | ✅ **Done** — 2026-07-09 |
 | 2 | `CrmAdapter.readJob` + the outcome pipeline | ✅ **Done** — 2026-07-09 |
 | 3 | Utterance generation (build time) | ✅ **Done** — 2026-07-09 |
-| 4 | `apps/agent` — one live call | ⬜ Not started ← **next** |
+| 4 | `apps/agent` — one live call | 🟡 **Core built** — 2026-07-10 (live-call gate deferred: 4.2/4.6/4.10) ← **next** |
 | 5 | Eval over the real path | ⬜ Not started |
 | 6 | Correction triage + FAQ | ⬜ Not started |
 | 7 | Product — auth, tenancy, onboarding, billing | ⬜ Not started |
@@ -271,15 +282,16 @@ in CI, and the build fails on drift.
 ledgerline/
 ├── apps/
 │   ├── web/                    Next.js — dashboard, onboarding, Twilio webhooks
-│   └── agent/                  Python — LiveKit agent worker (the call runtime)   [Step 4]
+│   └── agent/                  Python — LiveKit worker scaffold + generated Pydantic  🟡 [Step 4.2/4.6]
 ├── packages/
-│   ├── contracts/              Zod schemas → JSON Schema → Pydantic (codegen)
+│   ├── contracts/              Zod schemas → JSON Schema → Pydantic (codegen + drift guard) ✅
 │   ├── conversation/           SlotBook + state machine. Pure, no I/O.
 │   ├── safety/                 Emergency classifier (no LLM dependency)
-│   ├── validators/             Phone, address, service area, business hours
+│   ├── validators/             Phone, address (Google geocoder), service area, hours ✅
 │   ├── extraction/             LLM slot extractor behind SlotExtractor port        ✅
 │   ├── utterance/              Committed catalog + CachedUtterer (Utterer port)    ✅
 │   ├── crm/                    CrmAdapter + Housecall Pro + Jobber + readJob       ✅
+│   ├── runtime/               CallRuntime — the Effect[] binding (VoiceSession port) ✅
 │   ├── workflows/              Saga + booking transaction + outcome poller         ✅
 │   ├── telemetry/              Reliability metrics + latency budgets
 │   ├── db/                     Drizzle schema + migrations (Neon)                  ✅
@@ -708,27 +720,101 @@ of the geocoder's `formatted`; dropping the tenant timezone from `speakWindow`; 
 
 ---
 
-### Step 4 — `apps/agent`: one live call (2–3 weeks)
+### Step 4 — `apps/agent`: one live call 🟡 **Core built (2026-07-10); live-call gate deferred**
 
-Now the hardware. Everything above is already tested.
+Now the hardware — and the hardware is the half that a laptop with no vendor account cannot
+build. So this Step split cleanly the way Steps 1–3 did: **the whole `Effect[]` binding is
+built and tested against fakes** (`packages/runtime`), and the three tasks that need a real
+microphone, a real realtime model, or a real CRM sandbox are named and deferred rather than
+faked into a green that means nothing.
 
-| # | Task | Detail |
-|---|---|---|
-| 4.1 | Zod → Pydantic codegen in CI | `zod-to-json-schema` → `datamodel-code-generator`. Fail the build on drift. Never hand-edit output. |
-| 4.2 | Twilio number → SIP trunk → LiveKit room | Worker joins. |
-| 4.3 | `VoiceSession` port + `FakeVoiceSession` | Prove the `Effect[]` binding in CI before touching audio. |
-| 4.4 | Bind `Effect[]` → worker | §10.4. |
-| 4.5 | Classifier on **every ASR partial**, in-process | Before the transcript reaches any model. `HAZARD_DETECTED` short-circuits the turn. |
-| 4.6 | GPT-Realtime behind `apps/agent/voice/` | Its response format must not leak past that boundary. |
-| 4.7 | Google Address Validation behind the existing `Geocoder` port | |
-| 4.8 | Hangup → `PendingBooking` → WDK workflow → Housecall Pro job → Twilio SMS | `commitBooking()` does not change. |
-| 4.9 | Telemetry: every turn traced | |
-| 4.10 | **Verify `readJob` against a live Housecall Pro sandbox** | The Step 2 exit criterion, with a real credential. Book a job, edit its address by hand, poll it, assert `correctionRate`. Confirm `work_status` and `jobStatus` really carry the values the adapters map, and that a deleted job really answers `404` / `data.job: null`. Both vocabularies are transcribed from docs, not observed. |
+| # | Task | Detail | |
+|---|---|---|---|
+| 4.1 | Zod → Pydantic codegen in CI | JSON Schema for `Effect` + `PendingBooking` emitted from the Zod (`contracts/src/codegen.ts`), committed to `apps/agent/contracts.schema.json`, and drift-guarded in the PR suite. The Pydantic half (`datamodel-code-generator`) is a documented build command — no Python toolchain here. Surprise #7. | 🟡 |
+| 4.2 | Twilio number → SIP trunk → LiveKit room | Scaffolded in `apps/agent` (README, `pyproject.toml`, the Effect-dispatch worker), **not wired to hardware.** No credential. | ⬜ |
+| 4.3 | `VoiceSession` port + `FakeVoiceSession` | Shipped. The port emits `SpeechOutcome`, not `MachineEvent` — surprise #1. | ✅ |
+| 4.4 | Bind `Effect[]` → worker | `CallRuntime`, §10.4. The machine decides; the runtime performs. | ✅ |
+| 4.5 | Classifier on **every ASR partial**, in-process | `hearPartial` runs the deterministic classifier before the extractor is asked; `HAZARD_DETECTED` short-circuits the turn. | ✅ |
+| 4.6 | GPT-Realtime behind `apps/agent/voice/` | The provider boundary is documented; no realtime model is bound. `CallRuntime` speaks through the `VoiceSession` port, so the provider never reaches the core. | ⬜ |
+| 4.7 | Google Address Validation behind the existing `Geocoder` port | `GoogleGeocoder` shipped and tested against transcribed wire shapes through an injected `HttpTransport`. Never spoken to a live Google endpoint (4.10-class gap). | ✅ |
+| 4.8 | Hangup → `PendingBooking` → WDK workflow → Housecall Pro job → Twilio SMS | `CallRuntime` posts the `PendingBooking` to a `BookingSink` on `CREATE_PENDING_BOOKING`; `commitBooking()` is unchanged and consumes it. The WDK schedule and live CRM are Step 7 / 4.10. | ✅ |
+| 4.9 | Telemetry: every turn traced | Every spoken and heard turn becomes a `CallTurn`; `computeMetrics()` / `checkBudgets()` run over exactly what the caller experienced. Silence is a breach, not free speed. | ✅ |
+| 4.10 | **Verify `readJob` against a live Housecall Pro sandbox** | The Step 2 exit criterion, with a real credential. Book a job, edit its address by hand, poll it, assert `correctionRate`. Confirm `work_status` and `jobStatus` really carry the values the adapters map, and that a deleted job really answers `404` / `data.job: null`. Both vocabularies are transcribed from docs, not observed. | ⬜ |
 
-**Exit criteria — the first live-call gate.** 20 consecutive scripted-but-live calls from real phones.
-≥18 book a correct job. **Zero wrong addresses committed.** p95 first-word latency < 1.2s, p95
-turn latency < 2.0s. `checkBudgets()` green. Emergency phrase transfers within one turn, 10/10.
-And `computeMetrics()` reports a real `correctionRate` from those 20 calls.
+**Exit criteria — the first live-call gate. NOT MET, and cannot be without a Twilio/LiveKit
+credential.** 20 consecutive scripted-but-live calls from real phones. ≥18 book a correct job.
+**Zero wrong addresses committed.** p95 first-word latency < 1.2s, p95 turn latency < 2.0s.
+`checkBudgets()` green. Emergency phrase transfers within one turn, 10/10. And `computeMetrics()`
+reports a real `correctionRate` from those 20 calls.
+
+**What *is* met:** the same gate, driven end to end through the *real* machine, the *real*
+classifier, the *real* validators, and the *real* `Effect[]` binding, against a `FakeVoiceSession`
+and a `FakeExtractor`. `computeMetrics()` reports a `correctionRate` and `checkBudgets()` returns
+green from `CallRuntime`'s own traced turns; a scripted silent turn breaches `turnTakeRate`, which
+is the property that makes "you cannot buy latency with silence" a test rather than a slogan.
+
+**Result:** 611 tests (was 575), 99.18% coverage, typecheck clean, `apps/web` builds. The +36 are
+23 in `packages/runtime`, 10 for `GoogleGeocoder`, and 3 for the codegen drift guard.
+
+#### Seven things came out different from what this Step predicted
+
+1. **The `VoiceSession` port cannot emit `MachineEvent`, and that is principle #3.** §10.3 sketched
+   `perform(effects): Promise<void>` plus `onEvent(MachineEvent)`. But a `SLOT_FILLED` event carries
+   a value that has *already* been through `packages/validators` — the geocoder, the E.164 parse.
+   An audio layer that could construct one would have to own the geocoder, and principle #3 is that
+   the geocoder decides what an address is, not the thing listening to the caller. So effects go
+   down and **raw** speech comes back up: `say(text): Promise<SpeechOutcome>`, `transfer`, `hangUp`.
+   `CallRuntime` is the only thing that turns speech into a validated event.
+
+2. **`perform(): Promise<void>` left `CallTurn.turnTakeOk` with nowhere to come from.** Turn-take is
+   the metric Full-Duplex-Bench-v3 found the *fastest* model failing — silence in 22 of 100
+   scenarios. Only the layer that actually spoke knows whether it spoke, when its first word
+   landed, and whether it talked over the caller. So `say` returns a `SpeechOutcome` carrying
+   exactly those numbers, and a `void` return would have made principle #5's budgets uncomputable.
+
+3. **`EscalationReason.AGENT_ERROR` and its catalog line existed from day one with no event that
+   could reach them.** The extractor's `unavailable` outcome is what reaches them. `CallRuntime`
+   retries an `unavailable` extraction once behind the boundary, and a second outage drives a new
+   `AGENT_ERROR` machine event — an Anthropic outage is a human's problem, never a caller asked
+   their name a fourth time. A one-line addition to `machine.ts`, and the last dead escalation path
+   is now live.
+
+4. **`HttpTransport` moved from `crm` into `contracts`, for the same reason `Effect` did in Step 3.**
+   Task 4.7's `GoogleGeocoder` speaks HTTP to a vendor too, and the only alternative was
+   `validators` depending on `crm`, which points the dependency graph backwards. A port that
+   crosses a package boundary belongs in the spine. `crm/src/http.ts` is deleted; `FetchTransport`
+   performs real I/O from `contracts`, the same licence `systemClock` already takes.
+
+5. **The runtime arms exactly one slot per turn, so out-of-order fills never arise at *this* layer.**
+   `SlotBook` accepts any slot from any turn and the machine can cross four states on one utterance —
+   but the extractor is only ever asked the single slot the machine is focused on (principle #1,
+   enforced by the driving loop and not just the tool schema). A caller who volunteers three facts
+   at once is still asked for the other two in turn. Multi-slot-per-turn extraction was considered
+   and rejected: it is the sequential-tool-call task VoiceAgentBench shows models failing.
+
+6. **A rejected read-back has no dedicated machine event, so "no" routes back through extraction.**
+   On a rejected read-back `CallRuntime` re-extracts the *same* slot from the rejection utterance:
+   a different value corrects it (revoking the confirmation, and the machine reads the new value
+   back), while a bare "no" yields nothing and counts as an extraction failure — the bounded path
+   that escalates a caller stuck rejecting rather than looping forever. Reusing the extraction
+   escape hatch kept the machine's event set small and the loop finite.
+
+7. **Task 4.1's Pydantic half needs a tool this environment forbids installing (PEP 668).** So the
+   step split the way Step 1's fixtures did: the deterministic, offline half — the JSON Schema
+   generated *from* the Zod, and a test that fails the build the moment the committed copy drifts —
+   ships and is guarded in the PR suite. The `datamodel-code-generator` invocation that turns that
+   schema into `contracts.py` is a documented build command, and `contracts.py` is `.gitignore`d
+   because it is a generated artifact, never hand-edited.
+
+**Also settled, and worth not re-litigating:**
+
+- **The audio layer is a port with a fake, like everything else.** `FakeVoiceSession` records what
+  it was told to say and lets a test script a silent turn; `FakeBookingSink` records the payload
+  and can be made to throw. Tests assert on what the collaborator saw, never on a mocking framework.
+- **`validateSlot` is duplicated with `eval/src/simulate.ts` on purpose, narrowly.** Both dispatch a
+  raw extraction to the three validators, but `simulate.ts` also builds a `MachineEvent` for a
+  text-driven harness, and the two pull apart the moment either changes. The validator *set* is the
+  contract; a new one is a compile error in both places.
 
 ---
 
@@ -1143,15 +1229,23 @@ the extractor; #1 and #4 changed the contracts and the exit criterion respective
 you touch `diffBooking`; #3 is the one that would quietly corrupt the number we publish.
 ~~Step 3 — utterance generation.~~ Done 2026-07-09. Read surprise #3 before you touch
 `LlmUtterer`: the read-back is the verification step, and a model must never rephrase it.
+~~Step 4 — the `Effect[]` binding.~~ Core built 2026-07-10. `packages/runtime`'s `CallRuntime`
+drives a whole call against fakes; read its seven surprises before you touch the port, and #1
+first — the `VoiceSession` speaks and returns `SpeechOutcome`, it does not emit `MachineEvent`.
 
-1. **Step 4 — telephony.** ← you are here. Everything above is already tested. The `Effect[]`
-   seam now has five variants, and `GREET` must be the first thing the worker performs — the
-   `greeting_delivered` guard will not let the call move until it has.
-   Don't forget task 4.10: it closes Step 2's exit criterion against a real credential.
-2. **Step 5 — eval over the real path.** Task 5.5 measures the prompt cache before anyone
-   quotes §10.5's cost model.
+1. **Step 4 — the live-call gate.** ← you are here, and it is the *hardware* half now. The
+   `Effect[]` binding is tested; what remains needs credentials this laptop does not have:
+   4.2 (Twilio → SIP → LiveKit), 4.6 (GPT-Realtime behind `apps/agent/voice/`), and 4.10
+   (a live Housecall Pro sandbox, which also closes Step 2's exit criterion). `apps/agent` is a
+   documented scaffold; wiring it to a microphone is the work. The seam has five `Effect`
+   variants, and `GREET` must be the first thing performed — `greeting_delivered` blocks the
+   call until it has.
+2. **Step 5 — eval over the real path.** Now overlappable: bind `CallRuntime` into the eval
+   harness (5.1), and task 5.5 measures the prompt cache before anyone quotes §10.5's cost model.
 
-Telephony is now the right next thing precisely *because* it is no longer the uncertain part.
+The uncertain parts are retired: the model integration (Step 1), the wedge computation (Step 2),
+the committed catalog (Step 3), and now the whole conversational control loop (Step 4's core).
+What is left in Step 4 is plumbing to hardware, not risk.
 
 **Before you finish any step:** update the progress board at the top of this file and the
 step's own heading, in the same commit as the code. If you changed a boundary or a principle,

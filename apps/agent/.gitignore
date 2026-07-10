@@ -1,0 +1,8 @@
+# Generated from ../contracts.schema.json by `npm run gen:pydantic`.
+# Never hand-edited, never committed (plan.md, §10.4) — regenerate from the
+# committed, drift-guarded JSON Schema.
+agent/contracts.py
+
+__pycache__/
+*.py[cod]
+.venv/

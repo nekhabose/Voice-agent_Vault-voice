@@ -1,6 +1,16 @@
 /**
  * A transport port, so adapters are testable without a network and swappable
  * without touching their mapping logic.
+ *
+ * This lives in `contracts` rather than in `crm` because two packages now speak
+ * HTTP to a vendor: `crm` (Housecall Pro, Jobber) and `validators`
+ * (Google Address Validation, Step 4.7). A port that crosses a package boundary
+ * belongs in the spine, exactly as `Effect` did in Step 3 — and the alternative,
+ * `validators` depending on `crm`, points the dependency graph backwards.
+ *
+ * `FetchTransport` performs real I/O from `contracts`, which is the same licence
+ * `systemClock` and `realSleep` already take: the port and its honest
+ * implementation ship together, and every consumer injects the one it wants.
  */
 export interface HttpRequest {
   readonly method: "GET" | "POST" | "PUT" | "DELETE";

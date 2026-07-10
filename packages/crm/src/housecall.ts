@@ -1,5 +1,12 @@
-import type { Address, AddressInput, TimeWindow } from "@ledgerline/contracts";
-import type { HttpRequest, HttpResponse, HttpTransport } from "./http.js";
+import type {
+  Address,
+  AddressInput,
+  HttpRequest,
+  HttpResponse,
+  HttpTransport,
+  TimeWindow,
+} from "@ledgerline/contracts";
+
 import {
   asRecord,
   deletedSnapshot,

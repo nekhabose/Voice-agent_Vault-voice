@@ -1,0 +1,9 @@
+{
+  "name": "@ledgerline/agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Python LiveKit voice worker. This package.json only marks the npm workspace; the worker itself is Python (see pyproject.toml and README.md). Its contracts.py is generated from the Zod spine by `npm run gen:contracts` at the repo root.",
+  "scripts": {
+    "gen:pydantic": "datamodel-codegen --input contracts.schema.json --input-file-type jsonschema --output agent/contracts.py --output-model-type pydantic_v2.BaseModel"
+  }
+}

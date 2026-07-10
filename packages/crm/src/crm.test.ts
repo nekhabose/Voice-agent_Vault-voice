@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { Address, TimeWindow } from "@ledgerline/contracts";
-import { FakeTransport, FetchTransport, type FakeHandler, type HttpResponse } from "./http.js";
+import {
+  FakeTransport,
+  FetchTransport,
+  type Address,
+  type FakeHandler,
+  type HttpResponse,
+  type TimeWindow,
+} from "@ledgerline/contracts";
 import { HousecallProAdapter, firstName, lastName } from "./housecall.js";
 import { JobberAdapter } from "./jobber.js";
 import { CrmError, isRetryableStatus, type CrmAdapter, type OpContext } from "./types.js";
