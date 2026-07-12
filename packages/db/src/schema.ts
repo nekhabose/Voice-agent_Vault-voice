@@ -3,6 +3,7 @@ import {
   CallOutcomeSchema,
   CallStateSchema,
   EscalationReasonSchema,
+  FAQ_EMBEDDING_DIMENSIONS,
   LocaleSchema,
   OutcomeClassificationSchema,
   OutcomeSourceSchema,
@@ -23,6 +24,7 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
+  vector,
 } from "drizzle-orm/pg-core";
 
 /**
@@ -298,9 +300,63 @@ export const outcomes = pgTable(
     correctedFields: jsonb("corrected_fields").notNull().default({}),
     source: outcomeSourceEnum("source").notNull(),
     classification: outcomeClassificationEnum("classification"),
+    /** The model id that wrote `classification`. A label is only as good as its author. */
     classifiedBy: text("classified_by"),
+    /**
+     * Why the model said what it said. Not decoration: the weekly auditor has to
+     * be able to disagree in thirty seconds, and "agent_error" with no argument
+     * behind it is not something anybody can check. `runTriage` refuses to write a
+     * classification without one.
+     */
+    classificationRationale: text("classification_rationale"),
+    classifiedAt: timestamp("classified_at", { withTimezone: true }),
+    /** The weekly 10% audit. Overrides `classification` wherever it exists. */
     humanLabel: outcomeClassificationEnum("human_label"),
+    auditedBy: text("audited_by"),
+    auditedAt: timestamp("audited_at", { withTimezone: true }),
     observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
   },
   (table) => [index("outcomes_booking_idx").on(table.bookingId, table.observedAt)],
+);
+
+/* -------------------------------------------------------------------------- */
+/* FAQ (plan, §6 call site #3 — Step 6.4)                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The contractor's own answers, and the vectors we find them by.
+ *
+ * `answer` is spoken to the caller **verbatim**: a model selects which row
+ * responds to the question and never writes one (see `packages/faq`). That makes
+ * this table a review surface in exactly the way `catalog.ts` is — with the
+ * difference that the contractor, not us, is the reviewer, which is the only
+ * arrangement in which the agent can quote a price at all.
+ *
+ * `embedding` is `vector(FAQ_EMBEDDING_DIMENSIONS)`, spread from the contract for
+ * the same reason every `pgEnum` here is: two packages must agree on the width,
+ * and disagreeing is an insert that fails in production and nowhere else.
+ */
+export const faqEntries = pgTable(
+  "faq_entries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    question: text("question").notNull(),
+    answer: text("answer").notNull(),
+    embedding: vector("embedding", { dimensions: FAQ_EMBEDDING_DIMENSIONS }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // Cosine, because the embedder normalises nothing and the retrieval in
+    // `packages/faq` scores with cosine. An L2 index here and a cosine score
+    // there would rank differently, and the disagreement would show up as the
+    // agent answering the wrong question rather than as an error.
+    index("faq_entries_embedding_idx").using(
+      "hnsw",
+      table.embedding.op("vector_cosine_ops"),
+    ),
+    index("faq_entries_tenant_idx").on(table.tenantId),
+  ],
 );

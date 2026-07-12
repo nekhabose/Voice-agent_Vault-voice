@@ -78,6 +78,19 @@ async def perform_effect(
         else:  # WARM_TRANSFER, DIAL_911_GUIDANCE
             await voice.transfer(effect.reason)
 
+    elif kind == "SAY_FILLER":
+        # Spoken *before* the FAQ lookup runs, which is the whole of "never blocks
+        # the audio path": the caller hears something the moment they stop talking,
+        # and the retrieval happens inside the silence it buys. It says nothing,
+        # deliberately — we do not yet know whether we have an answer.
+        await voice.say(utterer.say(effect))
+
+    elif kind == "ANSWER_FAQ":
+        # The contractor's own committed answer, word for word, or the catalog's
+        # "someone will call you back" when nothing they wrote covers it. A model
+        # selected this sentence; no model wrote it (plan, §6 call site #3).
+        await voice.say(utterer.say(effect))
+
     elif kind == "CREATE_PENDING_BOOKING":
         await voice.say(utterer.say(effect))
         if pending_booking is not None:

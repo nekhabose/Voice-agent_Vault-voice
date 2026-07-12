@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
+    "@ledgerline/anthropic": "*",
     "@ledgerline/contracts": "*",
     "zod": "^3.24.1",
     "zod-to-json-schema": "^3.24.1"

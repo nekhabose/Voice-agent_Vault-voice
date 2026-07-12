@@ -4,6 +4,7 @@ import type {
   Clock,
   Effect,
   ExtractionContext,
+  FaqAnswerer,
   HazardDetection,
   Locale,
   SlotExtractor,
@@ -57,6 +58,12 @@ export interface CallRuntimeDeps {
   readonly extractor: SlotExtractor;
   readonly utterer: Utterer;
   readonly voice: VoiceSession;
+  /**
+   * Call site #3 (plan, §6). Optional: a tenant with no FAQ has no answers to
+   * select from, and a caller's question then costs them a reprompt, exactly as
+   * it did before Step 6.
+   */
+  readonly faq?: FaqAnswerer;
   readonly bookingSink: BookingSink;
   readonly geocoder: Geocoder;
   readonly windowPolicy: WindowPolicy;
@@ -77,9 +84,19 @@ export interface CallRuntimeDeps {
   /** Rides the booking to the CRM. English-only product; defaults to `en`. */
   readonly locale?: Locale;
   readonly maxExtractionFailures?: number;
+  /**
+   * How many questions we will detour for on one call. A caller who only ever
+   * asks questions is a caller who needs a person, and after this many the
+   * detour stops and the ordinary bounded extraction-failure path — which ends
+   * in `REPEATED_EXTRACTION_FAILURE` and a human — takes over.
+   */
+  readonly maxFaqAnswers?: number;
   /** Ambient fact the classifier uses for the freezing-weather rules. */
   readonly outdoorTempF?: number | null;
 }
+
+/** Three is enough to be helpful and few enough to notice we are not booking. */
+const DEFAULT_MAX_FAQ_ANSWERS = 3;
 
 /** What the next completed caller turn is expected to answer. */
 type Expecting =
@@ -97,6 +114,8 @@ export class CallRuntime {
   private idx = 0;
   /** Zero-based index of the caller utterance, for `ExtractionContext`. */
   private callerTurnIndex = 0;
+  /** Questions answered on this call. Bounded — see `maxFaqAnswers`. */
+  private faqAnswers = 0;
 
   constructor(private readonly deps: CallRuntimeDeps) {
     this.options = {
@@ -242,6 +261,15 @@ export class CallRuntime {
         return;
       }
 
+      // The two effects the machine never emits. They say something and change
+      // nothing: no slot, no state, no guard. `expecting` is deliberately left
+      // exactly as it was, because the caller still owes us the answer they were
+      // asked for before they interrupted to ask us something.
+      case "SAY_FILLER":
+      case "ANSWER_FAQ":
+        await this.speak(effect);
+        return;
+
       case "CREATE_PENDING_BOOKING":
         await this.speak(effect);
         await this.deps.bookingSink.submit(
@@ -286,6 +314,12 @@ export class CallRuntime {
       return;
     }
     if (outcome.kind === "absent") {
+      // The extractor found nothing in this utterance. Before calling that a
+      // failure, consider that the caller may not have been answering us at all.
+      if (this.shouldAnswerQuestion(text)) {
+        await this.answerQuestion(text);
+        return;
+      }
       await this.drive({ type: "EXTRACTION_FAILED", key });
       return;
     }
@@ -305,6 +339,55 @@ export class CallRuntime {
       value: validation.value,
       input: { confidence: outcome.confidence, validatorResult: validation.result },
     });
+  }
+
+  /* ---- the FAQ detour (plan, §6 call site #3) ---- */
+
+  /**
+   * A question is not an extraction failure.
+   *
+   * The detour is gated on **extraction having already come back empty**, which
+   * is what keeps it out of the booking's way: an utterance that fills the slot
+   * is never treated as a question, no matter how it is phrased, so the FAQ can
+   * never cost us a value the caller gave. What is left over is an utterance that
+   * yielded nothing — and if that utterance was a question, counting it as a
+   * failed extraction re-asks a caller who was waiting on an answer, and escalates
+   * them for it after three tries.
+   */
+  private shouldAnswerQuestion(text: string): boolean {
+    if (!this.deps.faq) return false;
+    if (this.faqAnswers >= (this.deps.maxFaqAnswers ?? DEFAULT_MAX_FAQ_ANSWERS)) return false;
+    return isQuestion(text);
+  }
+
+  /**
+   * Filler first, *then* the lookup. That ordering is the whole of "never blocks
+   * the audio path" (plan, §6): the caller hears something the moment they stop
+   * talking, and the retrieval and the model run inside the silence we bought.
+   *
+   * Then we put the same question back to them. The FAQ changes no slot, no state
+   * and no guard — `SAY_FILLER` and `ANSWER_FAQ` are the two effects the machine
+   * never emits — so the call resumes exactly where it was, and re-asking is
+   * `nextPrompt`'s answer rather than a sequence this layer planned.
+   */
+  private async answerQuestion(question: string): Promise<void> {
+    this.faqAnswers += 1;
+    await this.performOne({ type: "SAY_FILLER" });
+
+    const outcome = await this.deps.faq!.answer(question, {
+      callId: this.deps.callId,
+      turnIndex: this.callerTurnIndex,
+    });
+
+    // `unknown` and `unavailable` sound the same to the caller — a person will
+    // call them back — and mean opposite things to us. Only the answered case
+    // speaks, and what it speaks is the contractor's own committed sentence.
+    await this.performOne({
+      type: "ANSWER_FAQ",
+      answer: outcome.kind === "answered" ? outcome.answer : null,
+    });
+
+    await this.performEffects(nextPrompt(this.ctx));
   }
 
   private async confirmOrCorrect(key: SlotKey, text: string): Promise<void> {
@@ -410,6 +493,56 @@ const AFFIRMATIVES = [
 ];
 
 const NEGATIONS = ["no", "nope", "nah", "wrong", "incorrect", "not right", "isn't", "isnt"];
+
+/**
+ * Did the caller ask us something?
+ *
+ * Deterministic, and in our own code — the same reasoning as the emergency
+ * classifier (principle #4): this decides whether a *model* gets to speak to the
+ * caller about the business, and a model deciding that would be a model deciding
+ * when to run itself.
+ *
+ * ASR finals rarely carry punctuation, so the interrogative opener does most of
+ * the work. It is checked **only on an utterance the extractor already found
+ * nothing in**, which is what makes a loose test safe: the cost of a false
+ * positive is one honest "someone will call you back" where a reprompt would have
+ * done, and the cost of a false negative is the reprompt we would have given
+ * anyway.
+ */
+const INTERROGATIVES = [
+  "what",
+  "whats",
+  "when",
+  "where",
+  "why",
+  "who",
+  "how",
+  "do",
+  "does",
+  "did",
+  "is",
+  "are",
+  "can",
+  "could",
+  "will",
+  "would",
+  "should",
+  "am",
+];
+
+export function isQuestion(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed === "") return false;
+  if (trimmed.endsWith("?")) return true;
+
+  const words = trimmed
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .trim()
+    .split(/\s+/);
+  const first = words[0];
+  return first !== undefined && INTERROGATIVES.includes(first);
+}
 
 export function isAffirmative(text: string): boolean {
   const normalized = ` ${text.toLowerCase().replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim()} `;

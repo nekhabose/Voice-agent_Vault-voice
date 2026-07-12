@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { isOutage, outageReasonOrThrow } from "@ledgerline/anthropic";
 import type {
   ExtractionContext,
   ExtractionOutcome,
@@ -216,21 +217,11 @@ function clampConfidence(raw: unknown): number {
 }
 
 /**
- * Which failures are outages, and which are our bugs.
- *
- * A 400 means we built a bad request, a 401 means we shipped without a key —
- * both are defects that should crash loudly in staging rather than degrade into
- * a caller being asked their name four times.
+ * An outage is `unavailable`, never `absent` (principle #3). What counts as one
+ * is `@ledgerline/anthropic`'s call, not ours: three packages speak to this
+ * vendor and a private opinion about a `401` here would be a private way to
+ * degrade instead of crash.
  */
-function isOutage(error: unknown): boolean {
-  if (error instanceof Anthropic.APIConnectionError) return true;
-  if (error instanceof Anthropic.RateLimitError) return true;
-  if (error instanceof Anthropic.InternalServerError) return true;
-  return false;
-}
-
 function outageOrThrow(error: unknown): ExtractionOutcome {
-  if (!isOutage(error)) throw error;
-  const reason = error instanceof Error ? error.message : String(error);
-  return { kind: "unavailable", reason };
+  return { kind: "unavailable", reason: outageReasonOrThrow(error) };
 }

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { BookingOutcome, CallOutcome, CallRecord, CallTurn } from "@ledgerline/contracts";
-import { checkBudgets, computeMetrics, percentile } from "./metrics.js";
+import {
+  AUDIT_AGREEMENT_FLOOR,
+  MIN_AUDITED_OUTCOMES,
+  checkBudgets,
+  computeMetrics,
+  percentile,
+  publishedCorrectionRate,
+} from "./metrics.js";
 
 let seq = 0;
 const uuid = () => `00000000-0000-4000-8000-${String(seq++).padStart(12, "0")}`;
@@ -204,6 +211,171 @@ describe("computeMetrics — correction rate", () => {
       committedBookings: 1,
     });
     expect(metrics.correctionRate).toBe(1);
+  });
+});
+
+/**
+ * Step 6. Triage answers *why* a booking was corrected, and the only thing it is
+ * allowed to do with the answer is produce a second number beside the first. The
+ * suite below is mostly a list of ways it could have been allowed to do more.
+ */
+describe("computeMetrics — agent-error rate", () => {
+  const corrected = { service_address: "1247 SW 8th St" };
+
+  const scored = (outcomes: BookingOutcome[], committedBookings = 4) =>
+    computeMetrics({ calls: [], turns: [], outcomes, committedBookings });
+
+  /**
+   * The load-bearing default. A triage backlog, a declined verdict, an Anthropic
+   * outage, a cron nobody wired up — all of them leave `classification` null, and
+   * all of them must make the published number *worse*. The opposite reading
+   * ("unclassified, so probably not our fault") is the missed webhook again: a
+   * metric whose failure mode is "looks perfect".
+   */
+  it("counts an untriaged correction as our fault", () => {
+    const metrics = scored([outcome({ correctedFields: corrected })]);
+    expect(metrics.correctionRate).toBe(0.25);
+    expect(metrics.agentErrorRate).toBe(0.25);
+  });
+
+  it("drops a correction the triage pass attributed to the world, not to us", () => {
+    const metrics = scored([
+      outcome({ correctedFields: corrected, classification: "business_change" }),
+      outcome({ correctedFields: corrected, classification: "enrichment" }),
+    ]);
+    expect(metrics.correctionRate).toBe(0.5);
+    expect(metrics.agentErrorRate).toBe(0);
+  });
+
+  /** The raw rate never moves. Redefining it is the one thing that kills the wedge. */
+  it("never lets triage lower the raw correction rate", () => {
+    const metrics = scored([
+      outcome({ correctedFields: corrected, classification: "agent_error" }),
+      outcome({ correctedFields: corrected, classification: "business_change" }),
+    ]);
+    expect(metrics.correctionRate).toBe(0.5);
+    expect(metrics.agentErrorRate).toBe(0.25);
+    expect(metrics.agentErrorRate).toBeLessThanOrEqual(metrics.correctionRate);
+  });
+
+  it("lets the human auditor overrule the model, in both directions", () => {
+    const exonerated = scored([
+      outcome({
+        correctedFields: corrected,
+        classification: "agent_error",
+        humanLabel: "business_change",
+      }),
+    ]);
+    expect(exonerated.agentErrorRate).toBe(0);
+
+    const convicted = scored([
+      outcome({
+        correctedFields: corrected,
+        classification: "enrichment",
+        humanLabel: "agent_error",
+      }),
+    ]);
+    expect(convicted.agentErrorRate).toBe(0.25);
+  });
+
+  it("reports how often the model and the human agreed", () => {
+    const metrics = scored([
+      outcome({
+        correctedFields: corrected,
+        classification: "agent_error",
+        humanLabel: "agent_error",
+      }),
+      outcome({
+        correctedFields: corrected,
+        classification: "enrichment",
+        humanLabel: "agent_error",
+      }),
+      outcome({ correctedFields: corrected, classification: "agent_error" }),
+    ]);
+
+    expect(metrics.auditedOutcomes).toBe(2);
+    expect(metrics.triageAgreementRate).toBe(0.5);
+  });
+
+  it("has no agreement rate to report when nobody has audited anything", () => {
+    const metrics = scored([outcome({ correctedFields: corrected })]);
+    expect(metrics.auditedOutcomes).toBe(0);
+    expect(metrics.triageAgreementRate).toBe(0);
+  });
+
+  /** Three polls per booking. The label rides on the latest, and it is one booking. */
+  it("scores the latest observation of a booking, not all three", () => {
+    const bookingId = uuid();
+    const metrics = scored([
+      outcome({ bookingId, correctedFields: corrected, observedAt: "2026-07-10T09:00:00.000Z" }),
+      outcome({
+        bookingId,
+        correctedFields: corrected,
+        classification: "business_change",
+        observedAt: "2026-07-16T09:00:00.000Z",
+      }),
+    ]);
+    expect(metrics.correctionRate).toBe(0.25);
+    expect(metrics.agentErrorRate).toBe(0);
+  });
+});
+
+describe("publishedCorrectionRate", () => {
+  const corrected = { service_address: "1247 SW 8th St" };
+
+  /** `n` corrections, all triaged as not-our-fault, `audited` of them re-labeled by a human. */
+  const withAudit = (n: number, audited: number, agreeing: number): BookingOutcome[] =>
+    Array.from({ length: n }, (_, i) =>
+      outcome({
+        correctedFields: corrected,
+        classification: "business_change",
+        humanLabel:
+          i < agreeing ? "business_change" : i < audited ? "agent_error" : null,
+      }),
+    );
+
+  const scored = (outcomes: BookingOutcome[]) =>
+    computeMetrics({ calls: [], turns: [], outcomes, committedBookings: 100 });
+
+  /**
+   * The classifier is *earned*, not assumed. Until a human audit of meaningful
+   * size vouches for it, the number we publish is the raw one — which is worse for
+   * us, and true.
+   */
+  it("publishes the raw rate while the audit is too small to mean anything", () => {
+    const published = publishedCorrectionRate(scored(withAudit(30, 3, 3)));
+    expect(published.basis).toBe("raw");
+    expect(published.rate).toBe(0.3);
+    expect(published.reason).toContain("has not earned its place");
+  });
+
+  /** Plan, Step 6: "if model and human disagree more than ~5%... drop the classifier". */
+  it("drops the classifier when the human auditor disagrees too often", () => {
+    const published = publishedCorrectionRate(scored(withAudit(40, 25, 20)));
+    expect(published.basis).toBe("raw");
+    expect(published.rate).toBe(0.4);
+    expect(published.reason).toContain("80.0%");
+  });
+
+  it("publishes the triaged rate once the audit vouches for it", () => {
+    const metrics = scored(withAudit(40, 25, 25));
+    const published = publishedCorrectionRate(metrics);
+
+    expect(published.basis).toBe("agent_error");
+    expect(published.rate).toBe(metrics.agentErrorRate);
+    expect(published.rate).toBeLessThan(metrics.correctionRate);
+    expect(published.reason).toContain("25 audited labels");
+  });
+
+  it("states its basis, always: a rate without a method is a claim", () => {
+    for (const outcomes of [withAudit(30, 3, 3), withAudit(40, 25, 25)]) {
+      expect(publishedCorrectionRate(scored(outcomes)).reason).not.toBe("");
+    }
+  });
+
+  it("agrees with the constants the plan names", () => {
+    expect(AUDIT_AGREEMENT_FLOOR).toBe(0.95);
+    expect(MIN_AUDITED_OUTCOMES).toBe(20);
   });
 });
 

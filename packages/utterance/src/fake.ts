@@ -42,6 +42,13 @@ function render(effect: Effect): string {
       return `[ESCALATE ${effect.reason} ${effect.action}]`;
     case "CREATE_PENDING_BOOKING":
       return "[CREATE_PENDING_BOOKING]";
+    case "SAY_FILLER":
+      return "[SAY_FILLER]";
+    // The answer's *content* is the contractor's, so a harness asserting on the
+    // effect still has to see it: `[ANSWER_FAQ null]` and the answer itself are
+    // the two outcomes a caller can hear, and they are not interchangeable.
+    case "ANSWER_FAQ":
+      return `[ANSWER_FAQ ${effect.answer ?? "null"}]`;
   }
 }
 

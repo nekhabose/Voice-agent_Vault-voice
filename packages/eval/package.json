@@ -15,5 +15,8 @@
     "@ledgerline/extraction": "*",
     "@ledgerline/safety": "*",
     "@ledgerline/validators": "*"
+  },
+  "devDependencies": {
+    "@ledgerline/anthropic": "*"
   }
 }

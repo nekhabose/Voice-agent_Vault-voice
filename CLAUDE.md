@@ -92,16 +92,19 @@ cd apps/web && npm run build   # also typechecks the app
 
 ```
 packages/
-  contracts/     Zod schemas. The spine. Slots, states, effects, bookings, traces, ports, HTTP.
+  contracts/     Zod schemas. The spine. Slots, states, effects, bookings, traces, ports, HTTP, FAQ.
   conversation/  SlotBook + the state machine. Pure, no I/O.
   safety/        Deterministic emergency classifier. No LLM dependency.
   validators/    Phone, address (geocoder port + GoogleGeocoder), service area, business hours.
-  extraction/    The Anthropic slot extractor. One tool, one field, one turn.
+  anthropic/     The vendor boundary: the outage taxonomy + the wire-level test transport. No prompts.
+  extraction/    The Anthropic slot extractor. One tool, one field, one turn.        (call site #2)
+  faq/           Retrieval + selection. The model picks a committed answer, never writes one. (#3)
+  triage/        The correction classifier. Was the contractor's edit our mistake?    (#5)
   utterance/     Everything the agent says. Committed catalog, decided before the call.
   crm/           CrmAdapter interface + Housecall Pro + Jobber. Writes and reads.
   runtime/       CallRuntime. The Effect[] binding: caller ASR → machine → VoiceSession.
-  workflows/     Saga engine + post-call booking transaction + the outcome poller.
-  telemetry/     Reliability metrics + latency/turn-taking budgets.
+  workflows/     Saga engine + post-call booking transaction + the outcome poller + triage batch.
+  telemetry/     Reliability metrics + latency/turn-taking budgets + the publication rule.
   db/            Drizzle schema + migrations. Schema only — no client, no pool.
   eval/          Simulated-caller harness. Scenarios run in CI, over the real SlotExtractor port.
 apps/
@@ -116,17 +119,29 @@ contracts ──► conversation ──► validators ──► eval
     │              │               ▲   │        ▲
     ├──► safety ───┼───────────────┘   │────────┘
     ├──► extraction ───────────────────┼─────────┘  (eval binds it as of Step 5.1; runtime binds it in tests)
+    ├──► faq ─────────────────────────────┄┄─────►  (runtime binds it in tests)
+    ├──► triage ──────────────────────────┄┄─────►  (workflows binds it in tests)
     ├──► utterance ────────────────────┤            (runtime binds it in tests)
-    ├──► crm ──► workflows ┄┄► telemetry            (┄ = test-only)
-    ├──► runtime ┄┄► {extraction, utterance, telemetry}   (runtime deps: conversation, safety, validators)
+    ├──► crm ──► workflows ┄┄► {telemetry, triage}  (┄ = test-only)
+    ├──► runtime ┄┄► {extraction, faq, utterance, telemetry}  (runtime deps: conversation, safety, validators)
     ├──► telemetry ──► web
     └──► db
+
+anthropic ──► {extraction, faq, triage}    (the SDK; depends on nothing of ours)
 ```
 
-`extraction` depends on `contracts` alone. The model SDK *implementation* lives there and stays
-there — `runtime` binds a `SlotExtractor`, never `AnthropicExtractor` directly (it takes the
-port; tests inject `FakeExtractor`). `utterance` also depends on `contracts` alone — `LlmUtterer`
-reaches a model through a local `Phraser` port rather than importing the SDK.
+**Three packages speak to a model, and each depends on `contracts` alone (plus the SDK).**
+`extraction` (call site #2), `faq` (#3), and `triage` (#5) each own their prompt, their tool, and
+their outcome type. Nothing else in the tree imports `@anthropic-ai/sdk`: `runtime` binds a
+`SlotExtractor` and an `FaqAnswerer`, `workflows` binds a `CorrectionTriager`, and `utterance`'s
+`LlmUtterer` reaches a model through a local `Phraser` port. Ports down, implementations at the
+edge.
+
+`packages/anthropic` is the **vendor** boundary, not a call site: `isOutage`/`outageReasonOrThrow`
+(what a `429` means, versus a `400` that must crash) and `RecordingTransport`/`testClient`/`replay`
+(how a binding is proven with no credential). Both are properties of the API rather than of any one
+call site, and three private copies would drift silently — the same argument that moved
+`HttpTransport` into `contracts` in Step 4. It holds no prompts, no tools, and no domain types.
 
 `eval` depends on `extraction` **at runtime**, as of Step 5.1 — the dependency diagram always
 anticipated it ("eval binds it as of Step 5.1"). `simulate.ts` drives the real `SlotExtractor`
@@ -138,8 +153,8 @@ binding is proven offline through an injected `fetch` against a committed `tool_
 as `extraction`'s own replay suite works.
 
 `runtime` is the Step 4 `Effect[]` binding. It depends on `contracts`, `conversation`, `safety`,
-and `validators` at runtime, and on `extraction`, `utterance`, and `telemetry` **as
-devDependencies only**: `CallRuntime` speaks to those three through ports (`SlotExtractor`,
+and `validators` at runtime, and on `extraction`, `faq`, `utterance`, and `telemetry` **as
+devDependencies only**: `CallRuntime` speaks to those through ports (`SlotExtractor`, `FaqAnswerer`,
 `Utterer`) or emits their shapes (`CallTurn`), so the real implementations are needed only to
 drive and score the tests. `runtime.test.ts` runs a whole call — real machine, real classifier,
 real validators, real `Effect[]` binding — against `FakeVoiceSession` and `FakeExtractor`, then
@@ -166,10 +181,11 @@ value that only `CallRuntime` can construct (principle #3). Effects go down, raw
 `db` depends on `contracts` alone, and nothing depends on `db`. Every `pgEnum` is spread
 from a Zod schema rather than retyped, so the tables cannot drift from the domain.
 
-`workflows ┄┄► telemetry` is a **devDependency**, and the only test-only edge in the tree.
-`outcomes.test.ts` drives a hand-edited job body through the real adapter, the real poller,
-and the real `computeMetrics()` — the one place the whole wedge is exercised end to end.
-Do not promote it to a runtime dependency.
+`workflows ┄┄► {telemetry, triage}` are **devDependencies**. `outcomes.test.ts` drives a
+hand-edited job body through the real adapter, the real poller, and the real `computeMetrics()` —
+the one place the whole wedge is exercised end to end. `triage.test.ts` drives the real
+`runTriage()` against `FakeTriager`; the *real* `AnthropicTriager` is bound by the cron in Step 7,
+never by `workflows` itself. Do not promote either to a runtime dependency.
 
 `contracts` depends on nothing. Nothing depends on `web`. There are no cycles —
 keep it that way.
@@ -254,7 +270,7 @@ between the model and the geocoder.
 
 **No model speaks a sentence whose content is load-bearing.** `packages/utterance`
 holds a committed catalog, and `LlmUtterer` — a development drafting tool, never
-what ships — may paraphrase `ASK_FOR` and nothing else. The other four effects
+what ships — may paraphrase `ASK_FOR` and nothing else. The other six effects
 each carry content, not wording:
 
 - `GREET` carries the AI disclosure. Legal text. Pinned character-for-character.
@@ -265,9 +281,22 @@ each carry content, not wording:
 - `ESCALATE` carries life-safety guidance, read to someone who may be standing in
   a room filling with gas.
 - `CREATE_PENDING_BOOKING` promises an SMS to one specific number.
+- `SAY_FILLER` is spoken *before* we know whether the FAQ has an answer, so it must
+  promise nothing.
+- `ANSWER_FAQ` carries the contractor's own committed sentence about price, policy,
+  or hours — retrieved verbatim.
 
-Widening that check in `llm.ts` fails three tests. `plan.md` §10.2 originally said
+Widening that check in `llm.ts` fails five tests. `plan.md` §10.2 originally said
 the opposite; it was wrong, and Step 3 surprise #3 says why.
+
+**And the FAQ model *selects* a sentence; it never writes one.** `packages/faq` hands
+`claude-sonnet-5` the retrieved candidates and a forced tool whose only field is an
+`entry_id`. The caller then hears `faq_entries.answer` byte for byte. Generating an
+answer from retrieved context — the obvious design, and what §6 originally implied —
+is a model quoting a price on a recorded line that the contractor never approved, and
+it fails exactly the way a paraphrased `READ_BACK` fails: fluently, plausibly, and
+wrongly. An `entry_id` we never sent comes back `unknown`, because a hallucinated id is
+a sentence nobody wrote.
 
 ### 4. The emergency classifier does not ask an LLM for permission
 
@@ -330,6 +359,32 @@ The poller reads and never writes: `OutcomeDeps.crm` is
 `Pick<CrmAdapter, "readJob">`, so a metric that repairs the thing it measures
 does not compile.
 
+**Step 6 asks *why* a booking was corrected, and every safeguard exists because the
+model answering is an interested party.** `packages/triage` classifies each diff
+`agent_error | business_change | enrichment`; `packages/workflows/src/triage.ts` runs
+the batch; `packages/telemetry` decides what may be said out loud. Five rules:
+
+- **`correctionRate` stays raw.** Triage produces `agentErrorRate` *beside* it and
+  never subtracts from it. Redefining the headline metric because a classifier says
+  most failures "weren't really ours" is the behaviour that makes every competitor's
+  reliability claim worthless.
+- **An unclassified correction is an agent error.** `null` is guilt, not innocence. A
+  declined verdict, an Anthropic outage, a cron nobody wired up — each leaves the
+  correction counting against us, so *every failure mode of the triage pipeline pushes
+  the published number up*. The inverse is the missed webhook wearing a third hat: a
+  metric whose failure mode is "looks perfect".
+- **The raw diff is never written, and that is a type.** `TriageStore.classify` takes
+  the derived columns and cannot express an edit to `correctedFields` — the same move
+  as `Pick<CrmAdapter, "readJob">`.
+- **A verdict without a rationale is `declined`.** An unauditable exoneration is
+  precisely what this call site must not be able to produce.
+- **The classifier is licensed, not trusted.** `publishedCorrectionRate()` quotes
+  `agentErrorRate` only while ≥20 corrections carry a human label
+  (`MIN_AUDITED_OUTCOMES`) *and* the model agrees with the auditor ≥95% of the time
+  (`AUDIT_AGREEMENT_FLOOR`). Otherwise it quotes the raw rate and says why. The audit
+  sample is chosen by hashing the booking id — stable, so a disliked week cannot be
+  re-rolled, and assigned before the outcome existed, so it cannot be steered.
+
 ---
 
 ## Conventions
@@ -363,18 +418,21 @@ does not compile.
 
 ## Testing
 
-616 tests, 99.19% line coverage, thresholds enforced in `vitest.config.ts`.
+708 tests, 99.29% line coverage, thresholds enforced in `vitest.config.ts`.
 
 | Layer | Where | What it proves |
 |---|---|---|
 | Schema invariants | `contracts` | The graph is connected, terminal states have no successor, every slot has both a spec and an extraction schema, every `Effect` parses. And the worker JSON Schema is byte-current with the Zod — the codegen drift guard |
 | Unit | `conversation`, `safety`, `validators` | Slot mechanics, hazard precision/recall, phone/address/window rules, and `GoogleGeocoder`'s status→outcome mapping against transcribed wire shapes |
-| Review surface | `utterance` | The catalog is data, not template functions; every slot has an ask and a read-back; the AI disclosure is byte-for-byte what it was; `LlmUtterer` refuses to reword anything but `ASK_FOR` |
-| Replay | `extraction` | Committed model responses driven through the **real** `SLOT_SPECS`. **Zero live model calls** — the SDK's `fetch` is injected. A suite whose green depends on a third party's uptime teaches the team to ignore red |
+| Review surface | `utterance` | The catalog is data, not template functions; every slot has an ask and a read-back; the AI disclosure is byte-for-byte what it was; `LlmUtterer` refuses to reword anything but `ASK_FOR` — including the FAQ answer |
+| Replay | `extraction`, `faq`, `triage` | Committed model responses driven through the **real** tool schemas and the real contracts. **Zero live model calls** anywhere — the SDK's `fetch` is injected (`@ledgerline/anthropic`). A suite whose green depends on a third party's uptime teaches the team to ignore red. Each asserts its cached prefix is byte-identical across two different inputs, and that a `400` throws while a `429` degrades |
+| Selection, not generation | `faq` | The caller hears the contractor's committed answer verbatim; an `entry_id` the model invented comes back `unknown`; nothing above the floor means **no model call at all**; one tenant's answers never reach another's caller |
+| The interested party | `triage` + `workflows` | The classifier declines without a rationale, declines a label outside the enum, and cannot write to `correctedFields` (a type error). An outage and a decline both leave the correction counting against us, and neither aborts the batch |
 | Contract | `crm` | **One suite, both adapters.** If it passes for Housecall Pro and Jobber, the interface is not a rename of one vendor's endpoints. `readJob` is asserted in our vocabulary against each vendor's |
-| Runtime | `runtime` | A whole call driven through the **real** machine, classifier, validators, and `Effect[]` binding against `FakeVoiceSession` — greeting/disclosure first, out-of-order-safe read-backs, correction revokes confirmation, extraction outage retries then escalates as `AGENT_ERROR`, hazard on an ASR partial short-circuits before the extractor, and every turn traced so `checkBudgets()` scores it (silence breaches `turnTakeRate`) |
-| Drift | `db` | Every `pgEnum` equals its Zod source. No database is touched; that needs Neon |
-| Integration | `workflows` | The booking saga, including the forced `create_job` failure and its compensating rollback. And the outcome poller — a hand-edited job body through the real adapter, the real diff, and the real `computeMetrics()` |
+| Runtime | `runtime` | A whole call driven through the **real** machine, classifier, validators, and `Effect[]` binding against `FakeVoiceSession` — greeting/disclosure first, out-of-order-safe read-backs, correction revokes confirmation, extraction outage retries then escalates as `AGENT_ERROR`, hazard on an ASR partial short-circuits before the extractor, a caller's question detours through the FAQ (filler first, then the answer, then the same slot re-asked) without counting as an extraction failure, and every turn traced so `checkBudgets()` scores it (silence breaches `turnTakeRate`) |
+| Drift | `db` | Every `pgEnum` equals its Zod source, and the `pgvector` column is the width `contracts` declares. No database is touched; that needs Neon |
+| Integration | `workflows` | The booking saga, including the forced `create_job` failure and its compensating rollback. The outcome poller — a hand-edited job body through the real adapter, the real diff, and the real `computeMetrics()`. And the nightly triage batch, over real `BookingOutcome`s |
+| The published number | `telemetry` | `agentErrorRate ≤ correctionRate`, always; an untriaged correction counts as our fault; the human overrules the model; and `publishedCorrectionRate()` refuses the classifier below 20 audited labels or 95% agreement |
 | End-to-end | `eval` | Simulated callers through the real machine, classifier, validators, **and `SlotExtractor` port** — a fill scripts `FakeExtractor`, and the value flows text → port → validators → machine; the nightly `AnthropicExtractor` binding is driven offline through an injected `fetch` |
 
 ### Rules
@@ -383,7 +441,7 @@ does not compile.
   `readBacks` precisely because asserting the final *value* would also pass a
   system that silently kept a stale confirmation.
 - **Mutation-test the invariants that matter.** Break the thing, confirm the
-  suite screams, revert. Eighteen are verified: revoking confirmation on
+  suite screams, revert. Twenty-four are verified: revoking confirmation on
   correction (caught in 3 places); in-phrase fuzzy matching (drops recall to
   0.974); in `extraction`, dropping `thinking: {type:"disabled"}`, skipping the
   Zod re-validation of the model's output, interpolating a per-call value into
@@ -392,11 +450,18 @@ does not compile.
   field as a correction, counting outcome rows instead of bookings (caught in 2
   places), reading Jobber's truncated `title` instead of `instructions`,
   comparing `postalCode` exactly, comparing phone numbers as strings, and
-  restoring `CRM_WEBHOOK` to the contract; and, in `utterance`, letting
-  `LlmUtterer` paraphrase anything beyond `ASK_FOR` (caught in 3 places),
-  rewording `AI_DISCLOSURE`, reading back the caller's raw address instead of the
-  geocoder's `formatted`, dropping the tenant timezone from `speakWindow`, and
-  removing `GREET` from `nextPrompt`.
+  restoring `CRM_WEBHOOK` to the contract; in `utterance`, letting
+  `LlmUtterer` paraphrase anything beyond `ASK_FOR` (caught in 5 places, now
+  including `ANSWER_FAQ`), rewording `AI_DISCLOSURE`, reading back the caller's raw
+  address instead of the geocoder's `formatted`, dropping the tenant timezone from
+  `speakWindow`, and removing `GREET` from `nextPrompt`; and, added in Step 6:
+  treating an **unclassified correction as not-our-fault** in `telemetry`,
+  publishing the triaged rate without the human audit's licence (fails 5 tests),
+  running the **FAQ detour before extraction** so a filled slot is spent on a
+  question (fails 2), speaking an FAQ `entry_id` the model invented, and sampling
+  the weekly audit with `Math.random()` instead of hashing the booking id.
+  **`TriageStore.classify` writing `correctedFields` is not on this list because it
+  is a type error, not a test failure** — which is the stronger guarantee.
 - The emergency classifier reports precision **and** recall over a labeled
   bilingual corpus every run (38 hazards, 28 routine calls). `recall === 1.0` is
   asserted. Precision is currently 1.0, with 3 documented deliberate false
@@ -434,9 +499,26 @@ Stated plainly, because a README that implies otherwise is marketing.
   vocabularies (`work_status`, `jobStatus`) and the deleted-job responses (`404`,
   `data.job: null`) are transcribed from documentation, not observed. Task 4.10
   verifies them, and Step 2's exit criterion, where the credential first exists.
-- **Nothing schedules the poller.** `pollSchedule()` and `nextDuePoll()` say when
-  a booking is due; no cron calls them, and `bookings.completed_polls` is a column
-  nobody increments. That needs the database and Vercel WDK — Step 7.
+- **Nothing schedules the poller, and nothing schedules the nightly triage pass.**
+  `pollSchedule()` and `nextDuePoll()` say when a booking is due; `runTriage()` says
+  what to do with the corrections it finds. No cron calls either, and
+  `bookings.completed_polls` is a column nobody increments. That needs the database
+  and Vercel WDK — Step 7.
+- **The correction triager has never spoken to a live model, and no human has ever
+  audited a label.** `packages/triage` is real code against the real SDK, proven
+  offline through an injected `fetch` against **hand-authored** fixtures — the same
+  honesty as `extraction`'s. So we know the binding works, the enum holds, and a
+  rationale-less verdict is refused. We do **not** know whether `claude-opus-4-8`
+  labels a real correction the way a human would, and that number — the agreement
+  rate — is the licence to use the classifier at all. `publishedCorrectionRate()`
+  already assumes the answer is "not yet" and quotes the raw rate (task 6.5).
+- **The FAQ has no index, no rows, and no real embedder.** `packages/faq` is
+  exercised end to end — retrieval, selection, verbatim answer, the runtime detour —
+  but over `InMemoryFaqIndex` and `HashingEmbedder`, a deterministic bag-of-words
+  stand-in with **no semantics**: "how much do you charge" and "what does it cost"
+  score zero against each other. `pgvector` has never been queried, `faq_entries` has
+  never held a row, and `SIMILARITY_FLOOR` (0.15) is calibrated against the fake, which
+  is to say against nothing. Task 6.6, with the database.
 - **The `Effect[]` binding is built and tested, but only against fakes.**
   `packages/runtime`'s `CallRuntime` drives a whole call — greeting through
   booking — through the real machine, classifier, and validators, and it is the
@@ -465,11 +547,13 @@ Stated plainly, because a README that implies otherwise is marketing.
 - **`LlmUtterer` has no bound `Phraser`.** Nothing in the tree implements one;
   it is a drafting tool waiting for a credential, and `CachedUtterer` is what
   every code path actually uses.
-- **No database, only its schema.** `packages/db` is Drizzle tables and a
-  generated migration — no client, no pool, no query helpers, because
+- **No database, only its schema.** `packages/db` is Drizzle tables and two
+  generated migrations — no client, no pool, no query helpers, because
   `drizzle-kit generate` needs no database and nothing else in the tree has one.
-  The migration has never been applied. `apps/web/lib/demo-data.ts` still seeds
-  the dashboard and is typed against the real contracts, so the UI cannot drift.
+  Neither migration has ever been applied, including the `CREATE EXTENSION vector`
+  line that `0001` needs before `faq_entries` can exist. `apps/web/lib/demo-data.ts`
+  still seeds the dashboard and is typed against the real contracts, so the UI cannot
+  drift.
 - **No auth, no multi-tenancy, no billing.** Step 7.
 - **`eval` does not run over real SIP.** It answers "given what the caller said,
   does the system do the right thing?" The latency and barge-in numbers that are
@@ -537,10 +621,71 @@ Stated plainly, because a README that implies otherwise is marketing.
   same commit as any change to `Effect` or `PendingBooking`; `contracts/src/codegen.test.ts`
   fails the build otherwise. `contracts.py` is a generated, `.gitignore`d artifact —
   never hand-edit it (plan, §10.4).
+- **The FAQ detour is gated on extraction having already returned `absent`, and the
+  order is the safety property.** Move `shouldAnswerQuestion()` ahead of the extractor
+  and a caller saying "what? oh, Rosa Peña" loses their name to a filler utterance. Two
+  `runtime` tests fail if you do. The bound (`maxFaqAnswers`, 3) matters too: a caller
+  who only ever asks questions must fall back into the ordinary extraction-failure path,
+  which ends in a human.
+- **`CREATE EXTENSION IF NOT EXISTS vector;` in `migrations/0001` is hand-added**, and it
+  is the only hand-written line in any migration here. `drizzle-kit generate` emits the
+  `vector(1024)` column and the HNSW index but never the extension, so a generated-only
+  migration fails on its first statement against a fresh Neon. Migrations are
+  append-only, so regenerating will not delete it — but a future migration that
+  reintroduces `vector` on a database where `0001` never ran would need it again.
+- `packages/db`'s `vector("embedding", { dimensions: FAQ_EMBEDDING_DIMENSIONS })` and
+  `packages/faq`'s `Embedder` must agree on the width, which is why the constant lives in
+  `contracts`. A disagreement is an insert that fails in production and nowhere else.
+- **Extended thinking and a forced `tool_choice` cannot both be set** in the Messages API
+  (thinking permits `auto`/`none` only). Every model binding here forces the tool and
+  disables thinking. In `triage` that is a *deliberate* trade — a nightly batch could
+  afford the latency, but a label parsed out of a paragraph is a label that silently
+  mislabels whatever it fails to parse.
+- `packages/anthropic` holds `isOutage`/`outageReasonOrThrow` and the test transport, and
+  **nothing else**. Do not put a prompt, a tool, or a domain type in it: the moment it
+  knows about slots, it stops being the vendor boundary and becomes a second `contracts`.
 
 ---
 
 ## Change log
+
+- **Step 6 (core) — correction triage, the human audit, and the FAQ detour.** *(708 tests, 99.29%
+  coverage, typecheck clean, `apps/web` builds.)* Step 2 made the wedge computable: *that* a booking
+  was corrected. Step 6 asks *why*, and the entire step is an argument with itself about how a model
+  grading our own homework could cheat. `packages/triage` (call site #5) classifies each diff behind
+  the new `CorrectionTriager` port — one forced strict tool, a mandatory rationale, and a system
+  prompt whose last paragraph tells the model to be *harder* on itself. `packages/workflows/src/triage.ts`
+  runs the nightly batch and owns the stores. `packages/faq` (call site #3) answers a caller's
+  question behind a filler utterance, and `CallRuntime` performs the two new effects that carry it.
+
+  **The most dangerous sentence in `plan.md` was "only `agent_error` counts against
+  `correctionRate`".** Read literally, triage becomes a machine for deleting our own failures: a
+  classifier that declines, an outage, or a cron nobody wired up would each *silently improve* the
+  published figure — the missed-webhook failure mode wearing a third hat. So `correctionRate` stays
+  **raw**, `agentErrorRate` is computed beside it, **an unclassified correction counts as an agent
+  error**, and `publishedCorrectionRate()` refuses to use the classifier below 20 audited labels or
+  95% human agreement. Every failure mode of this pipeline now pushes the published number *up*.
+
+  **Three boundaries moved.** *(1)* `packages/anthropic` is new: three packages now speak to the
+  vendor, and what a `429` means — plus how a binding is proven with no credential — belongs in one
+  place, not three. The old rule ("the SDK lives in `extraction` and stays there") is retired. *(2)*
+  `Effect` gained `SAY_FILLER` and `ANSWER_FAQ`, the only two effects `transition()` never emits;
+  they change no slot, state, or guard, and `RUNTIME_ONLY_EFFECT_TYPES` names them so nobody
+  concludes they are dead. *(3)* `isCorrected` and `effectiveLabel` moved into `contracts`, because
+  `telemetry` and `workflows` must not disagree about what "corrected" means or whose label wins
+  (the human's).
+
+  **The FAQ model selects an answer; it never writes one.** `plan.md` §6 said "tool use +
+  `pgvector` retrieval", which reads like RAG — and RAG here is a model quoting a price on a
+  recorded line that the contractor never approved. The tool returns an *id*; the caller hears
+  `faq_entries.answer` verbatim; an id we never sent comes back `unknown`. That is principle #3
+  arrived at from the other end, and it makes the FAQ table a review surface owned by the
+  contractor exactly as `catalog.ts` is one owned by us.
+
+  **What is deferred, and named:** no live model call (the triager's fixtures are hand-authored, as
+  every binding's are), no human has ever audited a label, nothing schedules the nightly pass, and
+  the FAQ runs on `HashingEmbedder` + `InMemoryFaqIndex` because `pgvector` has no database to live
+  in. Tasks 6.5 and 6.6, both gated on Step 7 and a credential.
 
 - **Step 5 (core) — the eval binds the real `SlotExtractor` port.** *(616 tests, 99.19% coverage,
   typecheck clean, `apps/web` builds.)* `packages/eval/src/simulate.ts` no longer bakes the

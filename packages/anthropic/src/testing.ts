@@ -1,5 +1,4 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { MessageBody } from "./fixtures.js";
 
 /**
  * A transport fake for the Anthropic SDK, in the shape the rest of this repo
@@ -7,11 +6,34 @@ import type { MessageBody } from "./fixtures.js";
  * handler. Tests assert on `requests`, never on a mocking framework.
  *
  * The seam is the SDK's injectable `fetch`, deliberately, rather than a port of
- * our own wrapped around it. Two of the three things that can go wrong with this
- * extractor — adaptive thinking left on, and a cache prefix that differs between
- * turns — are properties of the bytes on the wire. A hand-rolled port would let
- * us assert on the arguments we passed to ourselves.
+ * our own wrapped around it. The things that go wrong with a model binding —
+ * adaptive thinking left on, a cache prefix that differs between turns, a tool
+ * schema that is not the one the contract describes — are properties of the
+ * bytes on the wire. A hand-rolled port would let us assert on the arguments we
+ * passed to ourselves.
+ *
+ * This is how every model binding in the tree is proven **offline**: extraction's
+ * replay suite, the eval's nightly `AnthropicExtractor` arm, the FAQ selector,
+ * and the correction triager. Zero live model calls in `npm test` — a suite whose
+ * green depends on a third party's uptime teaches the team to ignore red.
  */
+
+/** The JSON body of a `POST /v1/messages` response, as far as we read it. */
+export interface MessageBody {
+  readonly id: string;
+  readonly type: "message";
+  readonly role: "assistant";
+  readonly model: string;
+  readonly content: readonly unknown[];
+  readonly stop_reason: string;
+  readonly stop_sequence: null;
+  readonly usage: {
+    readonly input_tokens: number;
+    readonly output_tokens: number;
+    readonly cache_creation_input_tokens: number;
+    readonly cache_read_input_tokens: number;
+  };
+}
 
 export interface RecordedRequest {
   readonly url: string;

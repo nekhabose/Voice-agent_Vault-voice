@@ -10,10 +10,14 @@ import {
   HAZARD_CATEGORIES,
   LOW_CONFIDENCE_THRESHOLD,
   PendingBookingPayloadSchema,
+  RUNTIME_ONLY_EFFECT_TYPES,
   SLOT_KEYS,
   SLOT_SPECS,
   STATE_SPECS,
   TimeWindowSchema,
+  effectiveLabel,
+  isCorrected,
+  type BookingOutcome,
   type CallState,
   type Effect,
 } from "./index.js";
@@ -287,13 +291,34 @@ describe("effects", () => {
       },
     },
     { type: "CREATE_PENDING_BOOKING" },
+    { type: "SAY_FILLER" },
+    { type: "ANSWER_FAQ", answer: "Estimates are free for replacements." },
   ];
 
-  it("parses one of every effect the machine can emit", () => {
+  it("parses one of every effect the voice runtime can perform", () => {
     for (const effect of EVERY_EFFECT) {
       expect(EffectSchema.safeParse(effect).success).toBe(true);
     }
     expect(EVERY_EFFECT.map((e) => e.type).sort()).toEqual([...EFFECT_TYPES].sort());
+  });
+
+  /**
+   * Two effects the machine never emits, and a reader of `machine.ts` who cannot
+   * find where they are produced must not conclude they are dead. `CallRuntime`
+   * produces them, on a turn the caller spent asking us a question instead of
+   * answering ours — which changes no slot, no state, and no guard.
+   */
+  it("names the two effects `transition()` never emits", () => {
+    expect([...RUNTIME_ONLY_EFFECT_TYPES].sort()).toEqual(["ANSWER_FAQ", "SAY_FILLER"]);
+    for (const type of RUNTIME_ONLY_EFFECT_TYPES) {
+      expect(EFFECT_TYPES).toContain(type);
+    }
+  });
+
+  /** `null` is "no committed answer covers this", and it is a sentence, not a silence. */
+  it("lets an FAQ answer be null, because not knowing is an answer", () => {
+    expect(EffectSchema.safeParse({ type: "ANSWER_FAQ", answer: null }).success).toBe(true);
+    expect(EffectSchema.safeParse({ type: "ANSWER_FAQ" }).success).toBe(false);
   });
 
   it("rejects an effect type the voice runtime would not know how to perform", () => {
@@ -312,5 +337,39 @@ describe("effects", () => {
   /** The AI disclosure needs an effect to ride on, or nobody ever speaks it. */
   it("carries GREET, which is where the disclosure is spoken", () => {
     expect(EFFECT_TYPES).toContain("GREET");
+  });
+});
+
+/**
+ * `isCorrected` and `effectiveLabel` are the two sentences `telemetry` and
+ * `workflows` must agree on, so they live here. A disagreement between them is a
+ * published number that does not add up: one counts a booking as failed and the
+ * other never sends it for triage.
+ */
+describe("outcome labels (Step 6)", () => {
+  const outcome = (over: Partial<BookingOutcome> = {}): BookingOutcome => ({
+    bookingId: "b8f0d3c2-9a1e-4c7b-8f2d-6e5a4b3c2d1e",
+    cancelled: false,
+    correctedFields: {},
+    source: "CRM_POLL",
+    classification: null,
+    humanLabel: null,
+    observedAt: "2026-07-11T18:00:00.000Z",
+    ...over,
+  });
+
+  it("counts a cancellation and an edit alike, because both are failures", () => {
+    expect(isCorrected(outcome({ cancelled: true }))).toBe(true);
+    expect(isCorrected(outcome({ correctedFields: { caller_name: "Dana" } }))).toBe(true);
+    expect(isCorrected(outcome())).toBe(false);
+  });
+
+  /** The human is the point of the audit. A tie-break for the model makes it decorative. */
+  it("lets the human auditor override the model", () => {
+    expect(
+      effectiveLabel(outcome({ classification: "enrichment", humanLabel: "agent_error" })),
+    ).toBe("agent_error");
+    expect(effectiveLabel(outcome({ classification: "enrichment" }))).toBe("enrichment");
+    expect(effectiveLabel(outcome())).toBeNull();
   });
 });

@@ -156,6 +156,9 @@ describe("CachedUtterer", () => {
         hazard: hazard("GAS_LEAK"),
       },
       { type: "CREATE_PENDING_BOOKING" },
+      { type: "SAY_FILLER" },
+      { type: "ANSWER_FAQ", answer: "Estimates are free for replacements." },
+      { type: "ANSWER_FAQ", answer: null },
     ];
 
     for (const effect of effects) {
@@ -177,6 +180,30 @@ describe("CachedUtterer", () => {
 
     expect(first).toBe(CATALOG.ask.callback_phone.initial);
     expect(second).toBe(CATALOG.ask.callback_phone.reprompt);
+  });
+
+  /**
+   * The FAQ answer is the contractor's sentence, and it reaches the caller
+   * unedited. Wrapping it in words of ours would be us rewriting an answer about
+   * price or policy that they approved and will be held to.
+   */
+  it("speaks the contractor's FAQ answer verbatim, adding nothing", () => {
+    const answer =
+      "Estimates are free for replacements, and there's a seventy-nine dollar diagnostic fee for repairs.";
+    expect(utterer.line({ type: "ANSWER_FAQ", answer }, CTX)).toBe(answer);
+  });
+
+  it("promises a callback when no committed answer covers the question", () => {
+    expect(utterer.line({ type: "ANSWER_FAQ", answer: null }, CTX)).toBe(
+      CATALOG.faq.unknown,
+    );
+  });
+
+  /** The filler is spoken before we know whether we can answer, so it may not promise one. */
+  it("says a filler that commits to nothing", () => {
+    const line = utterer.line({ type: "SAY_FILLER" }, CTX);
+    expect(line).toBe(CATALOG.faq.filler);
+    expect(line).not.toMatch(/free|cost|price|\$/i);
   });
 
   describe("read-back", () => {
@@ -405,6 +432,11 @@ describe("LlmUtterer", () => {
       hazard: hazard("GAS_LEAK"),
     },
     { type: "CREATE_PENDING_BOOKING" },
+    { type: "SAY_FILLER" },
+    // The one that would undo Step 6.4. The FAQ answer is committed text about
+    // price and policy; a model that "naturally" rephrases it has quoted a number
+    // the contractor never approved, on a recorded line.
+    { type: "ANSWER_FAQ", answer: "Estimates are free for replacements." },
   ])("never asks a model to reword $type", async (effect) => {
     const phraser = new FakePhraser(["something a model made up"]);
     const line = await new LlmUtterer({ phraser }).say(effect, CTX);

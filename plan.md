@@ -8,50 +8,62 @@
 
 ---
 
-## Current status (verified 2026-07-10, after Step 5's core)
+## Current status (verified 2026-07-11, after Step 6's core)
 
 The domain core is built and green, the call runtime that binds it to a voice
-session is tested end to end without a phone, and the eval harness now drives
-extraction through the *real* `SlotExtractor` port instead of a value baked into
-the scenario. Everything below was re-run, not copied from a previous claim.
+session is tested end to end without a phone, the eval harness drives extraction
+through the *real* `SlotExtractor` port, and the wedge now has a *why* beside its
+*what*: correction triage, a human audit, and the rule that decides which number
+we are allowed to publish. Everything below was re-run, not copied from a previous
+claim.
 
 | Check | Result |
 |---|---|
-| `npm test` | **616 passed**, 17 files |
+| `npm test` | **708 passed**, 20 files |
 | `npm run typecheck` | clean |
-| `npm run test:coverage` | **99.19%** lines (thresholds: 90/90/85/90) |
+| `npm run test:coverage` | **99.29%** lines (thresholds: 90/90/85/90) |
 | `cd apps/web && npm run build` | builds, 3 routes |
 
 **Built.** `contracts`, `conversation` (SlotBook + the seven-state machine), `safety`
 (deterministic classifier, labeled corpus, `recall === 1.0`), `validators`, `extraction`
 (the Anthropic slot extractor behind the `SlotExtractor` port), `crm`
 (Housecall Pro + Jobber behind one contract suite, now including `readJob`), `workflows`
-(saga + compensating rollback + the outcome poller), `telemetry`
-(Full-Duplex-Bench-comparable definitions + CI budgets), `db` (Drizzle schema + the initial
-migration), `utterance` (the committed catalog + `CachedUtterer` behind the `Utterer` port),
+(saga + compensating rollback + the outcome poller + the nightly triage batch and the audit
+sampler), `telemetry`
+(Full-Duplex-Bench-comparable definitions + CI budgets + `agentErrorRate` and
+`publishedCorrectionRate()`), `db` (Drizzle schema + two migrations), `utterance` (the committed
+catalog + `CachedUtterer` behind the `Utterer` port),
 `runtime` (`CallRuntime` — the `Effect[]` binding, driving the machine from caller ASR through
-the extractor, classifier, and validators, tracing every turn, and posting the `PendingBooking`),
-`eval` (simulated callers, now over the real `SlotExtractor` port — Step 5.1), `apps/web`
-(dashboard). `validators` now also carries `GoogleGeocoder` behind the `Geocoder` port (Step 4.7),
-and `contracts` emits the worker's JSON Schema with a drift guard (Step 4.1).
+the extractor, classifier, and validators, tracing every turn, posting the `PendingBooking`, and
+— as of Step 6.4 — taking the FAQ detour when a caller asks a question instead of answering one),
+`eval` (simulated callers, over the real `SlotExtractor` port — Step 5.1), `apps/web`
+(dashboard). `validators` also carries `GoogleGeocoder` behind the `Geocoder` port (Step 4.7),
+and `contracts` emits the worker's JSON Schema with a drift guard (Step 4.1). Step 6 adds three
+packages: `triage` (call site #5, the correction classifier behind the `CorrectionTriager` port),
+`faq` (call site #3, retrieval + selection behind the `FaqAnswerer` port), and `anthropic` (the
+vendor boundary the three model call sites share — the outage taxonomy and the wire-level test
+transport).
 
 **Not built.** No telephony, no realtime model, no auth, no billing, no compliance work. **The
-`Effect[]` seam is now bound and tested, but only against fakes** — `apps/agent` is an honest
+`Effect[]` seam is bound and tested, but only against fakes** — `apps/agent` is an honest
 Python scaffold with no LiveKit room, no SIP trunk, and no GPT-Realtime (Step 4.2/4.6), and
 `CallRuntime` has never driven a real microphone. `GoogleGeocoder` has never spoken to a live
 Google endpoint, and the Pydantic half of the codegen has never run (no
-`datamodel-code-generator` in this environment). `AnthropicExtractor` exists but has never
-spoken to a live model — it is tested entirely against committed fixtures. The eval harness
-**now binds the real `SlotExtractor` port** (Step 5.1): the PR suite drives `FakeExtractor`
-scripted from each scenario, and the nightly arm binds `AnthropicExtractor` over the same seam —
-but that arm has still never called a live model, and re-recording the fixtures plus the live
-prompt-cache assertion is task 5.5. The `db` schema has never been applied to a
+`datamodel-code-generator` in this environment). **No model binding in this tree has ever spoken
+to a live model** — `AnthropicExtractor`, `AnthropicTriager`, and `AnthropicFaqAnswerer` are all
+real code against the real SDK, proven offline through an injected `fetch` against hand-authored
+fixtures. The eval harness binds the real `SlotExtractor` port (Step 5.1); its nightly arm has
+still never called a live model, and re-recording the fixtures plus the live prompt-cache
+assertion is task 5.5. The `db` schema has never been applied to a
 Postgres: `drizzle-kit generate` needs no database and `migrate` does, and no Neon instance
-exists (Step 7). **`observeOutcome()` now produces the `BookingOutcome[]` that
-`computeMetrics()` consumes, but it has only ever read a `FakeTransport`** — no live
-Housecall Pro sandbox has been polled (task 4.10). **No sentence in
-`packages/utterance/src/catalog.ts` has been spoken aloud by a TTS engine, and none has been
-read by a lawyer** (Step 8 gates the second; Step 4 the first).
+exists (Step 7) — which also means **`faq_entries` has no rows, `pgvector` has never been
+queried, and no real `Embedder` is bound** (`HashingEmbedder` is a deterministic stand-in with no
+semantics). **`observeOutcome()` produces the `BookingOutcome[]` that `computeMetrics()`
+consumes, but it has only ever read a `FakeTransport`** — no live Housecall Pro sandbox has been
+polled (task 4.10). **Nothing schedules the nightly triage pass, and no human has ever audited a
+label** (Step 7 gives it a cron and a database; the audit is a weekly ritual, not a function
+call). **No sentence in `packages/utterance/src/catalog.ts` has been spoken aloud by a TTS
+engine, and none has been read by a lawyer** (Step 8 gates the second; Step 4 the first).
 
 ### Progress board
 
@@ -67,15 +79,15 @@ person to open this file will trust it, and be wrong.
 | 3 | Utterance generation (build time) | ✅ **Done** — 2026-07-09 |
 | 4 | `apps/agent` — one live call | 🟡 **Core built** — 2026-07-10 (live-call gate deferred: 4.2/4.6/4.10) |
 | 5 | Eval over the real path | 🟡 **Core built** — 2026-07-10 (nightly/SIP arms deferred: 5.2/5.3/5.5) |
-| 6 | Correction triage + FAQ | ⬜ Not started ← **next** |
-| 7 | Product — auth, tenancy, onboarding, billing | ⬜ Not started |
+| 6 | Correction triage + FAQ | 🟡 **Core built** — 2026-07-11 (live/DB-gated tails: 6.1's live run, 6.3's weekly ritual, 6.4's `pgvector` + a real embedder) |
+| 7 | Product — auth, tenancy, onboarding, billing | ⬜ Not started ← **next** |
 | 8 | Compliance | ⬜ Not started |
 | 9 | Publish the number | ⬜ Not started |
 
 Not on the critical path, and unresolved: the `AgenticArm` A/B (§11), and
 `claude-haiku-4-5` vs `claude-sonnet-5` for extraction, scored on critical-slot accuracy.
 
-**Four questions no step so far could settle without a credential or a human.** Steps 1–3
+**Six questions no step so far could settle without a credential or a human.** Steps 1–6
 each built the real code against the real interface and hand-authored the strings, because no
 vendor account existed. Named so they cannot be quietly forgotten:
 
@@ -84,6 +96,13 @@ vendor account existed. Named so they cannot be quietly forgotten:
   **task 5.5**.
 - Whether Housecall Pro's `work_status` and Jobber's `jobStatus` carry the values `readJob`
   maps, and whether a deleted job really answers `404` / `data.job: null` — **task 4.10**.
+- Whether `claude-opus-4-8` labels a real correction the way a human would. The triage binding is
+  proven offline; the *agreement rate* is the number that decides whether we may use it at all,
+  and it cannot exist until real corrections and a real auditor do — **task 6.5**, and the
+  publication rule (`publishedCorrectionRate()`) already assumes the answer is "not yet".
+- Whether the retrieval floor and the embedder we eventually bind can tell "do you charge for an
+  estimate" from "do you charge for a callout". `HashingEmbedder` cannot; nothing has been
+  measured — **task 6.6**, with the database.
 - Whether the AI disclosure in `catalog.ts` satisfies counsel. It is committed, verbatim, and
   pinned by an exact-equality test — but "reviewed" is a signature, not an assertion, and no
   human has signed. **Step 8**, and it gates launch rather than code.
@@ -291,16 +310,25 @@ ledgerline/
 │   ├── conversation/           SlotBook + state machine. Pure, no I/O.
 │   ├── safety/                 Emergency classifier (no LLM dependency)
 │   ├── validators/             Phone, address (Google geocoder), service area, hours ✅
+│   ├── anthropic/              The vendor boundary: outage taxonomy + wire-level test transport ✅
 │   ├── extraction/             LLM slot extractor behind SlotExtractor port        ✅
+│   ├── faq/                    Retrieval + selection behind FaqAnswerer port (#3)  ✅
+│   ├── triage/                 Correction classifier behind CorrectionTriager port (#5) ✅
 │   ├── utterance/              Committed catalog + CachedUtterer (Utterer port)    ✅
 │   ├── crm/                    CrmAdapter + Housecall Pro + Jobber + readJob       ✅
 │   ├── runtime/               CallRuntime — the Effect[] binding (VoiceSession port) ✅
-│   ├── workflows/              Saga + booking transaction + outcome poller         ✅
-│   ├── telemetry/              Reliability metrics + latency budgets
-│   ├── db/                     Drizzle schema + migrations (Neon)                  ✅
+│   ├── workflows/              Saga + booking transaction + outcome poller + triage batch ✅
+│   ├── telemetry/              Reliability metrics + latency budgets + the publication rule ✅
+│   ├── db/                     Drizzle schema + migrations (Neon, pgvector)        ✅
 │   └── eval/                   Simulated-caller harness + scoring
 └── plan.md, idea.md, CLAUDE.md
 ```
+
+**Three packages speak to Anthropic, and none of them owns the vendor.** `extraction` (#2), `faq`
+(#3), and `triage` (#5) each hold their own prompt, tool, and outcome type; what a `429` *means*,
+and how a binding is proven without a credential, are properties of the API rather than of any
+call site, and they live in `anthropic`. Three private copies of that would drift, and the drift
+would be silent (Step 6, surprise #5).
 
 `packages/contracts` is load-bearing. Slot schemas, the state graph, and the `PendingBooking`
 shape are defined **once** in Zod. Drift between the agent's idea of a booking and the
@@ -317,9 +345,9 @@ Every place a model runs. Nothing else calls a model.
 |---|---|---|---|---|---|
 | 1 | Conversational surface (listen, backchannel, barge-in) | GPT-Realtime; Gemini Live as A/B arm | Realtime speech-to-speech | **Yes** | Fall back to cascade (ASR → text → TTS) |
 | 2 | Per-turn slot extraction | `claude-sonnet-5` | Strict tool use, one tool, one field | No — runs on the ASR transcript, concurrently | `EXTRACTION_FAILED`; machine re-asks |
-| 3 | FAQ / knowledge answers | `claude-sonnet-5` | Tool use + `pgvector` retrieval | No — behind a filler utterance | "Let me have someone call you back on that" |
+| 3 | FAQ / knowledge answers | `claude-sonnet-5` | Tool use + `pgvector` retrieval. **Selects a committed answer; never writes one** (Step 6.4) | No — behind a filler utterance | "Let me have someone call you back on that" |
 | 4 | Post-call summary and job notes | `claude-opus-4-8` | Structured output, adaptive thinking | No — after hangup | Booking still commits; notes marked `unsummarized` |
-| 5 | Correction triage | `claude-opus-4-8` | Structured output, nightly batch | No | Raw diff still recorded, uncategorized |
+| 5 | Correction triage | `claude-opus-4-8` | Structured output, nightly batch, forced tool (**not** adaptive thinking — the API forbids both at once; Step 6, surprise #2) | No | Raw diff still recorded, uncategorized — **and counted against us** |
 | 6 | Simulated caller (eval harness) | `claude-opus-4-8` | Tool use, persona-driven | No — CI only | Scenario fails loudly |
 | 7 | Utterance wording | `claude-opus-4-8` | **Build time, not call time** — §10.2 | No | N/A |
 
@@ -348,7 +376,9 @@ pending_bookings  call_id, tenant_id, payload(jsonb), status(enum), workflow_run
 bookings          pending_booking_id, crm_job_id, crm_customer_id, committed_at
 job_snapshots     booking_id, polled_at, payload(jsonb)     -- CRM state over time
 outcomes          booking_id, cancelled(bool), corrected_fields(jsonb), source,
-                  classification(enum), classified_by, human_label(nullable)
+                  classification(enum), classified_by, classification_rationale,
+                  classified_at, human_label(nullable), audited_by, audited_at
+faq_entries       tenant_id, question, answer, embedding(vector), updated_at
 escalations       call_id, reason(enum), triggered_at, transferred_to, human_ack_at
 ```
 
@@ -359,10 +389,23 @@ instead of measuring it:
 - `outcomes.corrected_fields` — ground truth. The raw diff.
 - `outcomes.classification` — was the edit *our* error, a business change, or an enrichment?
   Written by a nightly model pass. **Never destructive**; the raw diff is retained forever and
-  anyone can recount.
-- `outcomes.human_label` — a weekly 10% audit. We report the model's agreement with the human
-  *alongside* the correction rate. An unaudited classifier grading our own homework is
-  marketing with extra steps.
+  anyone can recount. `TriageStore.classify` takes the derived columns and *only* those, so a
+  future edit that "cleans up" a diff the classifier disagrees with does not typecheck.
+  **Null is not innocence:** an unclassified correction counts as an `agent_error` in
+  `agentErrorRate`, so a triage backlog, a declined verdict, or an Anthropic outage can only ever
+  make our published number worse (Step 6, surprise #1).
+- `outcomes.classification_rationale` — one or two sentences the auditor can check. A label with
+  no argument behind it is not auditable, and `runTriage` refuses to write one.
+- `outcomes.human_label` — a weekly 10% audit, sampled by hashing the booking id rather than by
+  rolling a die, so nobody can re-roll a week whose result they disliked. We report the model's
+  agreement with the human *alongside* the correction rate — and below 95% agreement (or fewer
+  than 20 audited labels) `publishedCorrectionRate()` publishes the **raw** rate and ignores the
+  classifier entirely. An unaudited classifier grading our own homework is marketing with extra
+  steps.
+
+`faq_entries.answer` is spoken to the caller **verbatim**, and the embedding is the only reason a
+model is involved at all: it *selects* which committed answer responds to the question. A model
+that composed the answer would be quoting a price nobody approved, on a recorded line (Step 6.4).
 
 `job_snapshots` exists because change detection is **polled, not webhooked**. Webhook support
 differs across vendors and delivery is lossy, and a missed webhook silently reports a 0%
@@ -907,18 +950,88 @@ escalates as `AGENT_ERROR`, a transient outage recovers on the retry, and the ni
 
 ---
 
-### Step 6 — Correction triage + FAQ (1 week)
+### Step 6 — Correction triage + FAQ 🟡 **Core built (2026-07-11); live/DB-gated tails deferred**
 
-| # | Task | Detail |
-|---|---|---|
-| 6.1 | Nightly `claude-opus-4-8` pass | Classify each diff: `agent_error \| business_change \| enrichment`. Only `agent_error` counts against `correctionRate`. |
-| 6.2 | Raw diff stored unclassified, forever | Classification is a derived column, never a destructive write. |
-| 6.3 | Weekly 10% human audit → `outcomes.human_label` | Publish the agreement rate *alongside* the correction rate. |
-| 6.4 | FAQ retrieval (`pgvector`) behind a filler utterance | Call site #3. Never blocks the audio path. |
+Step 2 made the wedge computable: *that* a booking was corrected. Step 6 asks *why*, and the
+whole step is an argument with itself about how a model that grades our own homework could cheat.
+The answer is not that the model is trustworthy. The answer is that **every failure mode of this
+pipeline makes our published number worse**, and that the classifier is not used at all until a
+human audit vouches for it.
+
+| # | Task | Detail | |
+|---|---|---|---|
+| 6.1 | Nightly `claude-opus-4-8` pass | `packages/triage`: `AnthropicTriager` behind the new `CorrectionTriager` port — one forced strict tool, `agent_error \| business_change \| enrichment \| null`, a mandatory rationale, and a system prompt whose last paragraph tells the model to be *harder* on itself. `runTriage()` in `packages/workflows` is the batch. Proven offline through an injected `fetch`; it has never called a live model. | 🟡 |
+| 6.2 | Raw diff stored unclassified, forever | Not a convention — a type. `TriageStore.classify` takes `{bookingId, observedAt, classification, rationale, classifiedBy, classifiedAt}` and cannot express an edit to `correctedFields`, exactly as `OutcomeDeps.crm = Pick<CrmAdapter, "readJob">` cannot express a write. | ✅ |
+| 6.3 | Weekly 10% human audit → `outcomes.human_label` | `auditSample()` hashes the booking id (deterministic, unre-rollable, unsteerable). `computeMetrics()` reports `auditedOutcomes` and `triageAgreementRate`; `publishedCorrectionRate()` refuses to use the classifier below 95% agreement or 20 labels. The *ritual* — a person, weekly — needs the dashboard and the database. | 🟡 |
+| 6.4 | FAQ retrieval (`pgvector`) behind a filler utterance | `packages/faq` + two new effects (`SAY_FILLER`, `ANSWER_FAQ`). The runtime speaks the filler *first*, then retrieves, then speaks — and the model **selects** a committed answer rather than writing one. `InMemoryFaqIndex` + `HashingEmbedder` ship; `pgvector` and a real embedder need the database. | 🟡 |
+| 6.5 | **Measure the model against a human, before quoting any triaged number** | The agreement rate is the licence to use the classifier at all, and it cannot exist until real corrections and a real auditor do. `publishedCorrectionRate()` already assumes the answer is "not yet" and quotes the raw rate. Needs a credential *and* a live CRM. | ⬜ |
+| 6.6 | Bind a real embedder; tune `SIMILARITY_FLOOR` against it | `HashingEmbedder` has no semantics — "how much do you charge" and "what does it cost" score zero against each other. The floor (0.15) is calibrated against *it*, which is to say against nothing. Step 7, with the database. | ⬜ |
 
 **If model and human disagree more than ~5% of the time, publish the raw correction rate and
-drop the classifier until it earns its place.** A model asked whether a contractor's edit was
-our own fault has an obvious bias.
+drop the classifier until it earns its place.** That sentence is now
+`publishedCorrectionRate()`, with `AUDIT_AGREEMENT_FLOOR = 0.95` and `MIN_AUDITED_OUTCOMES = 20`.
+It was written *before* the day the raw number embarrasses us, which is the only day it matters.
+
+**Exit (met for the core, and the gap is named).** The triage pipeline runs end to end over real
+`BookingOutcome`s, the FAQ detour runs end to end inside a real call, and six mutations of the
+invariants were verified to fail the suite. What has never happened: a live model call, a real
+correction, a human auditor, and a `pgvector` query.
+
+**Result:** 708 tests (was 616), 99.29% coverage, typecheck clean, `apps/web` builds.
+
+#### Five things came out different from what this Step predicted
+
+1. **"Only `agent_error` counts against `correctionRate`" was the most dangerous sentence in this
+   plan, and it is now two numbers instead of one.** Read literally, it makes triage a machine for
+   deleting our own failures: a classifier that declines, an Anthropic outage, or a cron nobody
+   wired up would each *silently improve* the published figure — the missed-webhook failure mode
+   (§7) wearing a third hat. So `correctionRate` stays **raw and untouched**, `agentErrorRate` is
+   computed beside it, and **an unclassified correction is an agent error**. Every way this
+   pipeline can fail now pushes the published number *up*. That inversion is the whole step, and
+   `packages/telemetry` has a test for each direction.
+
+2. **Extended thinking and a forced `tool_choice` are mutually exclusive in the Messages API**, so
+   §6's "structured output, adaptive thinking" for call site #5 could not be had. We kept the
+   forced tool: a nightly pass whose label has to be parsed out of a paragraph is a nightly pass
+   that mislabels whatever it fails to parse, and a label outside the enum is not a fourth kind of
+   correction — it is `declined`, which counts against us.
+
+3. **The FAQ model selects an answer; it never writes one.** §6 said "tool use + `pgvector`
+   retrieval", which reads like RAG — retrieve context, generate an answer. That is a model quoting
+   a price on a recorded line that the contractor never approved, and "the retrieval was right, the
+   phrasing drifted" is not a defence anyone will accept. So the tool returns an *id*, the caller
+   hears the contractor's committed sentence verbatim, and an id we never sent comes back
+   `unknown`. This is principle #3's "no model speaks a sentence whose content is load-bearing",
+   arrived at from the other end — and it makes `faq_entries.answer` a review surface owned by the
+   contractor, exactly as `catalog.ts` is one owned by us.
+
+4. **A question is not an extraction failure, and the fix is where the check sits.** The FAQ detour
+   runs **only on an utterance the extractor already found nothing in**, which is what makes it
+   safe: an utterance that fills a slot can never be spent on the FAQ, however it is phrased. Put
+   the question check *first* and a caller saying "what? oh, Rosa Peña" loses their name to a
+   filler. Two `runtime` tests fail if you move it. And a caller who only ever asks questions is
+   bounded (`maxFaqAnswers`, 3) into the ordinary extraction-failure path, which ends in a human.
+
+5. **Three packages now speak to Anthropic, so the vendor got a boundary.** `CLAUDE.md` said "the
+   model SDK implementation lives in `extraction` and stays there"; Step 6 adds two more call
+   sites, and that rule stops being true. What must *not* be triplicated is the answer to "is a
+   `429` an outage or our bug" and "how do we prove a binding with no credential" — both are
+   properties of the API, not of any call site. `packages/anthropic` holds exactly those two
+   things and nothing else: no prompts, no tools, no domain types.
+
+**Also settled, and worth not re-litigating:**
+
+- **`isCorrected` and `effectiveLabel` live in `contracts`.** `telemetry` counts corrections and
+  `workflows` decides which ones to send for triage; if they disagreed about what "corrected"
+  means, the published number would not add up. The human label always beats the model's — a
+  tie-break that preferred the model would make the audit decorative.
+- **The audit sample is hashed, not random.** Stable (the same booking is in or out forever, so a
+  disliked week cannot be re-rolled) and unsteerable (the id was assigned before the outcome
+  existed). `Math.random()` is neither, and nothing in this repo reads entropy it did not inject.
+- **`SAY_FILLER` and `ANSWER_FAQ` are the only effects `transition()` never emits.** They change no
+  slot, no state, and no guard, so they are not machine events — but they are still effects,
+  because the Python worker is the thing that has to speak them. `RUNTIME_ONLY_EFFECT_TYPES` names
+  them so a reader of `machine.ts` does not conclude they are dead.
 
 ---
 
@@ -1173,6 +1286,13 @@ thing that performs effects.
 | `READ_BACK` | Speak the value. Await yes/no. Emit `SLOT_CONFIRMED`, or a corrected `SLOT_FILLED`. |
 | `ESCALATE` | `WARM_TRANSFER` → SIP REFER. `DIAL_911_GUIDANCE` → speak, then transfer. `DECLINE` → close. |
 | `CREATE_PENDING_BOOKING` | POST the `PendingBooking` to the control plane. Do not wait for the CRM. |
+| `SAY_FILLER` | Speak. Buys the FAQ lookup its time out loud. Content-free by construction — it is spoken *before* we know whether we have an answer. |
+| `ANSWER_FAQ` | Speak the contractor's committed answer verbatim, or the catalog's callback promise when `answer` is null. |
+
+The last two are the only effects **`transition()` never emits** (`RUNTIME_ONLY_EFFECT_TYPES`).
+`CallRuntime` produces them on a turn the caller spent asking *us* something, and they change no
+slot, no state, and no guard — the call resumes exactly where it was, with `nextPrompt()` re-asking
+the question the caller interrupted.
 
 The classifier runs on **every ASR partial**, in-process, before the transcript reaches a model.
 `HAZARD_DETECTED` short-circuits the turn. That ordering is load-bearing, and it is why
@@ -1190,8 +1310,9 @@ Per call, roughly 12 turns and 6 extractions:
 | Item | Model | Per call | Notes |
 |---|---|---|---|
 | Extraction ×6 | `claude-sonnet-5` | ~1.2k in (cached), ~0.3k out | Cache read ≈ 0.1× input price |
+| FAQ selection ×0–3 | `claude-sonnet-5` | ~0.4k in (cached prefix + candidates), ~0.05k out | Only on a turn the extractor found nothing in, and only above the retrieval floor — a question nothing matches costs *no* model call at all |
 | Post-call summary | `claude-opus-4-8` | ~4k in, ~1k out | Off the critical path |
-| Correction triage | `claude-opus-4-8` | amortized, nightly | Per booking, not per call |
+| Correction triage | `claude-opus-4-8` | amortized, nightly | Per *corrected* booking, not per call. Most bookings are never triaged, because most are never corrected |
 
 The realtime model dominates cost and is priced per minute. Extraction is a rounding error
 **provided the cache hits.** Put `cache_read_input_tokens` on a dashboard from day one.
@@ -1203,6 +1324,73 @@ p95; alert at 600ms.
 
 **You cannot buy latency with silence.** The fastest model in Full-Duplex-Bench-v3 had the worst
 turn-take rate. If extraction is slow, speak a filler. Do not go quiet.
+
+### 10.6 Correction triage, and the number we are allowed to publish
+
+*Built in Step 6. The design is a list of ways a model grading our own homework could cheat, and
+what stops each one.*
+
+The pipeline is three files. `packages/triage` asks the model; `packages/workflows/src/triage.ts`
+runs the batch and owns the stores; `packages/telemetry/src/metrics.ts` decides what may be said
+out loud.
+
+```
+observeOutcome()  →  BookingOutcome{correctedFields, classification: null}   ← raw, forever
+runTriage()       →  ClassificationRecord{classification, rationale, ...}    ← derived, additive
+auditSample()     →  HumanLabelRecord{humanLabel, auditedBy, ...}            ← the human wins
+computeMetrics()  →  correctionRate (raw)  +  agentErrorRate  +  triageAgreementRate
+publishedCorrectionRate()                                                    ← which one we quote
+```
+
+Five properties, and each is load-bearing:
+
+1. **The raw diff is never written.** `TriageStore.classify` accepts the derived columns and
+   nothing else, so an edit that "cleans up" a diff the classifier disagrees with does not
+   compile. Same move as `OutcomeDeps.crm = Pick<CrmAdapter, "readJob">`.
+2. **Null is guilt, not innocence.** `agentErrorRate` counts an unclassified correction as an agent
+   error. A declined verdict, an outage, an un-run cron — each leaves the correction counting
+   against us, so every failure mode of this pipeline pushes the published number *up*.
+3. **A verdict needs an argument.** `interpret()` returns `declined` for a label with no rationale.
+   An unauditable exoneration is precisely what this call site must not be able to produce.
+4. **The model may only lower the number, and only with a licence.** `publishedCorrectionRate()`
+   quotes `agentErrorRate` **only** while ≥20 corrections carry a human label and the classifier
+   agrees with the auditor ≥95% of the time. Otherwise it quotes the raw rate and says why.
+5. **The audit sample is hashed, not rolled.** `auditSample()` buckets on the booking id: stable
+   across re-runs (a disliked week cannot be re-rolled) and assigned before the outcome existed
+   (it cannot be steered toward the easy cases).
+
+The system prompt's last paragraph is the bias correction — *"You are classifying the mistakes of
+the system you are part of… That is a reason to be harder on yourself, not easier"* — and it is the
+most important text in the package. A model asked whether an edit was its own fault reaches for the
+exculpatory reading, and every exculpatory reading improves the number we publish.
+
+### 10.7 FAQ retrieval — the model that selects, and does not write
+
+*Built in Step 6.4. §6 called this "tool use + `pgvector` retrieval", which reads like RAG. It is
+deliberately not RAG.*
+
+```
+caller: "do you charge for an estimate?"
+  ↓ extractor returns `absent`         ← the gate: a filled slot is never spent on the FAQ
+  ↓ isQuestion(text)                    ← deterministic, ours, not a model's call
+  ↓ SAY_FILLER  ("Let me check that for you.")   ← spoken FIRST; the lookup runs in the silence
+  ↓ embed → pgvector top-5 → drop anything below SIMILARITY_FLOOR
+  ↓ nothing left?  → `unknown`, and NO model call at all
+  ↓ claude-sonnet-5, forced strict tool: { entry_id: string | null }
+  ↓ id we never sent?  → `unknown`
+  ↓ ANSWER_FAQ  (the contractor's committed sentence, verbatim)
+  ↓ nextPrompt()  → the slot they interrupted, asked again
+```
+
+The model's entire decision space is *which of these approved answers responds to this question, or
+none*. It cannot write a sentence, summarise one, or blend two. The alternative — generating from
+retrieved context — is a model quoting a price on a recorded line that the contractor never
+approved, and it fails in the way `READ_BACK` fails when a model "naturally" renders `1247 Calle
+Ocho` as `1247 SW 8th St`: fluently, plausibly, and wrongly.
+
+`FaqOutcome` separates `unknown` (nothing we wrote covers it) from `unavailable` (we could not
+ask). The caller hears the same sentence either way; a dashboard that could not tell them apart
+would send us to fix the index when what we needed was to write an FAQ entry.
 
 ---
 

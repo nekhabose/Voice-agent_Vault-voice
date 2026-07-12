@@ -34,7 +34,25 @@ export class CachedUtterer implements Utterer {
         return this.escalate(effect, ctx);
       case "CREATE_PENDING_BOOKING":
         return this.close(ctx);
+      case "SAY_FILLER":
+        return this.catalog.faq.filler;
+      case "ANSWER_FAQ":
+        return this.answerFaq(effect);
     }
+  }
+
+  /**
+   * The contractor's committed answer, spoken verbatim — or, when nothing they
+   * wrote covers the question, the catalog's promise of a callback.
+   *
+   * `effect.answer` is the one string this class speaks that does not come from
+   * `catalog.ts`, and it is still not generated: it is the contractor's own text,
+   * retrieved and selected (plan, §6 call site #3). Wrapping it in words of ours
+   * — "Sure! So," — would be us editing an answer about price or policy that
+   * they signed off on, so we do not.
+   */
+  private answerFaq(effect: Extract<Effect, { type: "ANSWER_FAQ" }>): string {
+    return effect.answer ?? this.catalog.faq.unknown;
   }
 
   /** Opening, then the disclosure verbatim, then the invitation. In that order. */

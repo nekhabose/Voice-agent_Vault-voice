@@ -14,22 +14,10 @@
  * eval arm, never in `npm test`.
  */
 
-/** The JSON body of a `POST /v1/messages` response, as far as we read it. */
-export interface MessageBody {
-  readonly id: string;
-  readonly type: "message";
-  readonly role: "assistant";
-  readonly model: string;
-  readonly content: readonly unknown[];
-  readonly stop_reason: string;
-  readonly stop_sequence: null;
-  readonly usage: {
-    readonly input_tokens: number;
-    readonly output_tokens: number;
-    readonly cache_creation_input_tokens: number;
-    readonly cache_read_input_tokens: number;
-  };
-}
+import type { MessageBody } from "@ledgerline/anthropic";
+
+/** The wire shape of a `POST /v1/messages` response. Shared by every binding. */
+export type { MessageBody };
 
 interface ToolUse {
   readonly name: string;

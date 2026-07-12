@@ -31,8 +31,26 @@ export const EFFECT_TYPES = [
   "READ_BACK",
   "ESCALATE",
   "CREATE_PENDING_BOOKING",
+  "SAY_FILLER",
+  "ANSWER_FAQ",
 ] as const;
 export type EffectType = (typeof EFFECT_TYPES)[number];
+
+/**
+ * The two effects `transition()` never emits.
+ *
+ * A caller who asks "do you charge for the estimate?" has not advanced the state
+ * machine and must not be allowed to: the FAQ detour is a side-channel that
+ * answers a question and then puts the same slot back in front of them
+ * (`CallRuntime.answerQuestion`). It changes no slot, no state, and no guard, so
+ * it is not a machine event — but it is still an effect, because the audio layer
+ * is the thing that has to speak it, and the Python worker performs exactly this
+ * union (task 4.1).
+ *
+ * Listed rather than merely implied, so that a reader of `machine.ts` who cannot
+ * find where these are produced does not conclude they are dead.
+ */
+export const RUNTIME_ONLY_EFFECT_TYPES = ["SAY_FILLER", "ANSWER_FAQ"] as const;
 
 export const EffectSchema = z.discriminatedUnion("type", [
   /**
@@ -54,6 +72,25 @@ export const EffectSchema = z.discriminatedUnion("type", [
     hazard: HazardDetectionSchema.nullable(),
   }),
   z.object({ type: z.literal("CREATE_PENDING_BOOKING") }),
+  /**
+   * Buy the FAQ retrieval its time out loud. Content-free by construction: a
+   * filler that said anything load-bearing would be a sentence spoken before we
+   * knew whether we could answer (plan, §6 call site #3 — "never blocks the
+   * audio path" means the caller hears something *while* we look, not that the
+   * lookup is fast).
+   */
+  z.object({ type: z.literal("SAY_FILLER") }),
+  /**
+   * Speak the contractor's committed FAQ answer, or admit we do not have one.
+   *
+   * `answer` is a string the **contractor wrote**, retrieved verbatim — never a
+   * sentence a model composed. The model's job at this call site is to *select*
+   * which committed answer (if any) responds to the question; selection is a
+   * classification, and composition would be a model quoting a price nobody
+   * approved. `null` means no committed answer covers it, and the catalog's
+   * "someone will call you back" line is what the caller hears (principle #3).
+   */
+  z.object({ type: z.literal("ANSWER_FAQ"), answer: z.string().nullable() }),
 ]);
 
 export type Effect = z.infer<typeof EffectSchema>;

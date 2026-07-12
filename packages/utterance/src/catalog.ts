@@ -70,6 +70,19 @@ export interface UtteranceCatalog {
   /** Life-safety guidance, read *before* the transfer. We never simply hang up on a gas leak. */
   readonly hazardGuidance: { readonly [H in HazardCategory]: string };
   readonly transfer: { readonly [A in EscalationAction]: string };
+  /**
+   * The FAQ detour (plan, §6 call site #3). Two lines, and neither is an answer:
+   * `filler` is what the caller hears *while* retrieval runs, and `unknown` is
+   * what they hear when nothing the contractor wrote covers the question.
+   *
+   * The answer itself is not in this catalog, and cannot be — it is the
+   * contractor's own committed text, spoken verbatim from their FAQ. A model
+   * selects it; no model writes it.
+   */
+  readonly faq: {
+    readonly filler: string;
+    readonly unknown: string;
+  };
   readonly closing: string;
 }
 
@@ -161,6 +174,13 @@ export const CATALOG: UtteranceCatalog = {
       "If anyone is in danger, hang up and call 911. Otherwise, stay on the line and I'll get you to a person right now.",
     WARM_TRANSFER: "Hold on, I'm getting you to someone right now.",
     DECLINE: "Thanks for calling.",
+  },
+
+  faq: {
+    // Says nothing, on purpose. It is spoken *before* we know whether we have an
+    // answer, so anything load-bearing here would be a promise we cannot keep.
+    filler: "Let me check that for you.",
+    unknown: "Let me have someone call you back on that.",
   },
 
   closing:

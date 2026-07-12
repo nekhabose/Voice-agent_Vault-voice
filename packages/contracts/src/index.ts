@@ -15,3 +15,4 @@ export * from "./states.js";
 export * from "./emergency.js";
 export * from "./booking.js";
 export * from "./call.js";
+export * from "./faq.js";

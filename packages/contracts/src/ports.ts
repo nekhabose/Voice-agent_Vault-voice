@@ -3,7 +3,11 @@
  * package for a two-line interface, and so tests never depend on ambient
  * global state.
  */
-import type { PendingBookingPayload } from "./booking.js";
+import type {
+  BookingOutcome,
+  OutcomeClassification,
+  PendingBookingPayload,
+} from "./booking.js";
 import type { Effect } from "./effects.js";
 import type { SlotKey, SlotValueMap } from "./slots.js";
 import type { EscalationReason } from "./states.js";
@@ -63,6 +67,97 @@ export interface SlotExtractor {
     utterance: string,
     ctx: ExtractionContext,
   ): Promise<ExtractionOutcome>;
+}
+
+/* -------------------------------------------------------------------------- */
+/* FAQ answers (plan, §6 call site #3)                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Per-call facts the FAQ answerer may need and must never bake into a cached
+ * prompt prefix — the same discipline as {@link ExtractionContext}, and separate
+ * from it because the two call sites cache different prefixes and will drift.
+ */
+export interface FaqContext {
+  readonly callId: string;
+  /** Zero-based index of the caller utterance that asked the question. */
+  readonly turnIndex: number;
+}
+
+export type FaqOutcome =
+  /**
+   * A committed answer covers the question. `answer` is the contractor's own
+   * text, retrieved verbatim: the model selected it, and did not write it.
+   */
+  | { readonly kind: "answered"; readonly answer: string; readonly entryId: string }
+  /**
+   * Nothing the contractor has written answers this. Distinct from a failure —
+   * we asked, and the honest answer is that we do not know. The caller is told
+   * a person will call them back.
+   */
+  | { readonly kind: "unknown" }
+  /**
+   * We could not ask (model or retrieval outage). Distinct from `unknown`
+   * exactly as `ExtractionOutcome.unavailable` is distinct from `absent`: the
+   * caller hears the same fallback, but a dashboard that cannot tell "we have no
+   * answer" from "we were down" cannot tell us to write more FAQ entries.
+   */
+  | { readonly kind: "unavailable"; readonly reason: string };
+
+/**
+ * Call site #3, and the only model that speaks to the caller *about* the
+ * business. It never blocks the audio path: `CallRuntime` speaks a filler
+ * first, and whatever comes back is spoken after (plan, §6).
+ */
+export interface FaqAnswerer {
+  answer(question: string, ctx: FaqContext): Promise<FaqOutcome>;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Correction triage (plan, §6 call site #5 — Step 6)                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One booking's evidence, as the triage model sees it: what the agent captured,
+ * and what the contractor's CRM said afterwards.
+ *
+ * Both halves are needed. A corrected address in isolation says nothing about
+ * *why* it changed; `1247 Calle Ocho` → `1247 SW 8th St` is us getting it wrong,
+ * and `1247 Calle Ocho` → `88 Alhambra Cir` is the customer moving the job.
+ */
+export interface TriageCase {
+  readonly outcome: BookingOutcome;
+  /** What the call actually captured and committed. */
+  readonly booked: PendingBookingPayload;
+}
+
+export type TriageVerdict =
+  | {
+      readonly kind: "classified";
+      readonly classification: OutcomeClassification;
+      /** Why. Read by the human auditor, who has to be able to disagree cheaply. */
+      readonly rationale: string;
+    }
+  /**
+   * The model looked and could not tell. Left unclassified on purpose: an
+   * unclassified correction counts as an `agent_error` in the published number
+   * (`packages/telemetry`), so a shrug costs us rather than flatters us.
+   */
+  | { readonly kind: "declined"; readonly reason: string }
+  /** Outage. Same rule: nothing is written, and the diff keeps counting against us. */
+  | { readonly kind: "unavailable"; readonly reason: string };
+
+/**
+ * The nightly pass that asks whether an edit was *our* mistake (plan, Step 6.1).
+ *
+ * A model asked whether a contractor's edit was its own fault has an obvious
+ * bias, and this port is arranged so that bias cannot reach the number quietly:
+ * it may only *lower* the published rate, only with a written rationale, only on
+ * a diff that is stored forever and can be recounted, and only while a weekly
+ * human audit agrees with it (Step 6.3). It never writes to `correctedFields`.
+ */
+export interface CorrectionTriager {
+  classify(triageCase: TriageCase): Promise<TriageVerdict>;
 }
 
 /* -------------------------------------------------------------------------- */

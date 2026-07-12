@@ -16,6 +16,7 @@
   },
   "devDependencies": {
     "@ledgerline/extraction": "*",
+    "@ledgerline/faq": "*",
     "@ledgerline/telemetry": "*",
     "@ledgerline/utterance": "*"
   }

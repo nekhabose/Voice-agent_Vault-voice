@@ -1,5 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import {
+  RecordingTransport,
+  replay,
+  testClient,
+  type Handler,
+} from "@ledgerline/anthropic";
+import {
   LOW_CONFIDENCE_THRESHOLD,
   SLOT_KEYS,
   SLOT_SPECS,
@@ -15,7 +21,6 @@ import {
 } from "./extractor.js";
 import { FakeExtractor, absent, filled, unavailable } from "./fake.js";
 import * as fx from "./fixtures.js";
-import { RecordingTransport, replay, testClient, type Handler } from "./testing.js";
 import { strictify, stripNulls, toolFor, toolNameFor } from "./tool.js";
 
 const CTX: ExtractionContext = { callId: "call_01", turnIndex: 0 };

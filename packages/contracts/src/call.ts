@@ -62,8 +62,33 @@ export type CallRecord = z.infer<typeof CallRecordSchema>;
 export const ReliabilityMetricsSchema = z.object({
   calls: z.number().int().nonnegative(),
   containmentRate: z.number().min(0).max(1),
-  /** Fraction of committed bookings the contractor later edited or cancelled. */
+  /**
+   * Fraction of committed bookings the contractor later edited or cancelled.
+   *
+   * **The raw number, and it stays raw.** Step 6's triage tells us *why* an edit
+   * happened, and the answer never subtracts from this figure — it produces
+   * {@link agentErrorRate} beside it. Redefining the headline metric because
+   * the classifier says an edit "wasn't our fault" is exactly the behaviour that
+   * makes every competitor's reliability claim worthless (plan, principle #5).
+   */
   correctionRate: z.number().min(0).max(1),
+  /**
+   * The subset of corrections triage attributes to *us*, over the same
+   * denominator. `agentErrorRate <= correctionRate`, always — an untriaged
+   * correction counts as an agent error until a classifier and a human say
+   * otherwise, so a triage backlog or an outage can only ever make this number
+   * worse. Publishing it requires the human audit to agree; see
+   * `publishedCorrectionRate()` in `packages/telemetry`.
+   */
+  agentErrorRate: z.number().min(0).max(1),
+  /** Corrected bookings carrying a human audit label (Step 6.3's weekly 10%). */
+  auditedOutcomes: z.number().int().nonnegative(),
+  /**
+   * How often the nightly classifier and the human auditor chose the same label.
+   * Published *beside* the correction rate, never instead of it: an unaudited
+   * classifier grading our own homework is marketing with extra steps.
+   */
+  triageAgreementRate: z.number().min(0).max(1),
   bargeInRate: z.number().min(0).max(1),
   turnTakeRate: z.number().min(0).max(1),
   firstWordLatencyP50Ms: z.number().nonnegative(),

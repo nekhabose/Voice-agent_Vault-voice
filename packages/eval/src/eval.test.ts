@@ -1,9 +1,8 @@
+import { RecordingTransport, testClient } from "@ledgerline/anthropic";
 import type { ExtractionOutcome, SlotExtractor } from "@ledgerline/contracts";
 import {
   CALLER_NAME_FILLED,
   FakeExtractor,
-  RecordingTransport,
-  testClient,
   unavailable,
 } from "@ledgerline/extraction";
 import { describe, expect, it } from "vitest";

@@ -107,3 +107,29 @@ export const BookingOutcomeSchema = z.object({
   observedAt: IsoTimestampSchema,
 });
 export type BookingOutcome = z.infer<typeof BookingOutcomeSchema>;
+
+/**
+ * The booking failed. Cancelled or edited — either way we got it wrong, and
+ * counting the two separately would let us report the flattering half.
+ *
+ * Defined here rather than in `telemetry` or `workflows` because both compute
+ * from it and a disagreement between them is a published number that does not
+ * add up: `telemetry` puts these in the numerator of `correctionRate`, and
+ * `workflows` sends exactly these — and nothing else — to the triage model. A
+ * booking nobody touched has no "why" for a model to invent.
+ */
+export const isCorrected = (outcome: BookingOutcome): boolean =>
+  outcome.cancelled || Object.keys(outcome.correctedFields).length > 0;
+
+/**
+ * The label that counts, when a model and a human have both had a go.
+ *
+ * **The human wins.** The whole reason we run a weekly audit is that the model is
+ * the interested party; a tie-break that preferred the model's answer would make
+ * the audit decorative. `null` — nobody has labeled it — is *not* an absence of
+ * fault: `packages/telemetry` counts an unlabeled correction as an agent error,
+ * so a triage backlog can only ever make our published number worse.
+ */
+export const effectiveLabel = (
+  outcome: BookingOutcome,
+): OutcomeClassification | null => outcome.humanLabel ?? outcome.classification;

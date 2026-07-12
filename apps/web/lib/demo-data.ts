@@ -7,7 +7,7 @@ import type {
   HazardDetection,
   SlotKey,
 } from "@ledgerline/contracts";
-import { computeMetrics } from "@ledgerline/telemetry";
+import { computeMetrics, publishedCorrectionRate } from "@ledgerline/telemetry";
 
 /**
  * Seed data for the dashboard: one realistic day at a small Miami plumbing shop.
@@ -383,9 +383,12 @@ const OUTCOMES: readonly BookingOutcome[] = BOOKED.map((call, index) => ({
   // We poll rather than trust a webhook: a missed webhook reports a 0%
   // correction rate, which is exactly the number a dishonest vendor publishes.
   source: index === 1 ? "CONTRACTOR_DASHBOARD" : "CRM_POLL",
-  // Written by Step 6's nightly triage pass, and audited weekly by a human.
-  classification: null,
-  humanLabel: null,
+  // Step 6's nightly pass looked at the one correction and called it ours; the
+  // weekly human audit looked at the same diff and agreed. It changes nothing
+  // about what we publish yet — one audited label is not evidence, and
+  // `publishedCorrectionRate()` says so out loud rather than quietly using it.
+  classification: index === 1 ? "agent_error" : null,
+  humanLabel: index === 1 ? "agent_error" : null,
   observedAt: "2026-07-08T18:30:00.000Z",
 }));
 
@@ -395,6 +398,16 @@ export const METRICS = computeMetrics({
   outcomes: OUTCOMES,
   committedBookings: BOOKED.length,
 });
+
+/**
+ * The number we are *entitled* to show, and why (plan, Step 6.3).
+ *
+ * With one audited correction, the answer is the raw rate: the classifier has not
+ * earned the right to lower it. The dashboard prints the reason next to the
+ * figure, because a contractor being shown a reliability number deserves to know
+ * which one it is.
+ */
+export const PUBLISHED = publishedCorrectionRate(METRICS);
 
 /* -------------------------------------------------------------------------- */
 /* Formatting                                                                  */

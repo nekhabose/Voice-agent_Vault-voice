@@ -1,5 +1,5 @@
 {
-  "name": "@ledgerline/workflows",
+  "name": "@ledgerline/anthropic",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,11 +9,6 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@ledgerline/contracts": "*",
-    "@ledgerline/crm": "*"
-  },
-  "devDependencies": {
-    "@ledgerline/telemetry": "*",
-    "@ledgerline/triage": "*"
+    "@anthropic-ai/sdk": "^0.110.0"
   }
 }

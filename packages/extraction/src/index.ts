@@ -8,5 +8,4 @@
 export * from "./extractor.js";
 export * from "./fake.js";
 export * from "./fixtures.js";
-export * from "./testing.js";
 export * from "./tool.js";
