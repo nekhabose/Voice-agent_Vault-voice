@@ -1,12 +1,23 @@
 import {
   isCorrected,
+  type AuditStore,
   type BookingOutcome,
+  type ClassificationRecord,
   type Clock,
   type CorrectionTriager,
+  type HumanLabelRecord,
   type OutcomeClassification,
   type PendingBookingPayload,
   type TriageCase,
+  type TriageStore,
 } from "@ledgerline/contracts";
+
+/**
+ * The four store types moved into `contracts` in Step 7, so `packages/db` can
+ * implement them without depending on `workflows`. Re-exported from where they are
+ * used — the same move `machine.ts` makes with `Effect`.
+ */
+export type { AuditStore, ClassificationRecord, HumanLabelRecord, TriageStore };
 
 /**
  * Correction triage (plan, Step 6.1–6.3).
@@ -30,45 +41,6 @@ import {
  *      `publishedCorrectionRate()` in `packages/telemetry` stops using the
  *      classifier at all.
  */
-
-/** One row of the derived columns. Never a diff, never a `correctedFields`. */
-export interface ClassificationRecord {
-  readonly bookingId: string;
-  /** Identifies *which* observation is being labeled: a booking has up to three. */
-  readonly observedAt: string;
-  readonly classification: OutcomeClassification;
-  /** What the auditor reads before agreeing or disagreeing. Never empty. */
-  readonly rationale: string;
-  /** The model id. A label is only as good as the thing that produced it. */
-  readonly classifiedBy: string;
-  readonly classifiedAt: string;
-}
-
-/** The weekly 10% audit (Step 6.3). Written by a person, and it overrides the model. */
-export interface HumanLabelRecord {
-  readonly bookingId: string;
-  readonly observedAt: string;
-  readonly humanLabel: OutcomeClassification;
-  readonly auditedBy: string;
-  readonly auditedAt: string;
-}
-
-/**
- * What the nightly pass reads and writes.
- *
- * `classify` cannot express an edit to `correctedFields`, and that is the type
- * system carrying Step 6.2 rather than a comment asking nicely.
- */
-export interface TriageStore {
-  /** Corrected bookings with no classification yet, oldest first. */
-  pending(limit: number): Promise<readonly TriageCase[]>;
-  classify(record: ClassificationRecord): Promise<void>;
-}
-
-/** Deliberately a separate port: the nightly model pass must not hold this one. */
-export interface AuditStore {
-  recordHumanLabel(record: HumanLabelRecord): Promise<void>;
-}
 
 export interface TriageDeps {
   readonly triager: CorrectionTriager;
@@ -199,7 +171,9 @@ export interface TriageRow {
 }
 
 /**
- * The Postgres one is Step 7's; this is the tested implementation of both ports.
+ * The test double for both ports. `PgTriageStore` (Step 7) is the one that ships, and
+ * the same suite runs against both — a store that satisfies this contract in memory
+ * and not in Postgres is a contract that was only ever describing the double.
  *
  * `classify` and `recordHumanLabel` write *new* outcome objects with the derived
  * column set. `correctedFields` is copied through untouched — which is not a

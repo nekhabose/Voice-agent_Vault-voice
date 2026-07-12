@@ -133,3 +133,52 @@ export const isCorrected = (outcome: BookingOutcome): boolean =>
 export const effectiveLabel = (
   outcome: BookingOutcome,
 ): OutcomeClassification | null => outcome.humanLabel ?? outcome.classification;
+
+/**
+ * **An untriaged correction is an agent error until someone shows otherwise.**
+ *
+ * This one line is what keeps triage from being a way to make the number look better.
+ * `null` — the nightly pass has not run, the model declined, Anthropic was down, the
+ * cron is broken — reads as *our fault*, so every failure mode of the triage pipeline
+ * pushes the published number *up* toward the raw correction rate. A classifier can only
+ * ever lower it, and only by producing an argument a human auditor can check.
+ *
+ * The inverse — unclassified means "not our fault" — is the missed webhook wearing its
+ * third hat (plan, §7): a metric whose failure mode is "looks perfect".
+ *
+ * **It lives here, in the spine, because three packages now ask it.** `telemetry`
+ * publishes the number; `workflows` decides what to send the model; and as of Step 7
+ * `billing` decides whether to *charge* for the booking. If those three disagreed about
+ * what counts as our fault, we would invoice a contractor for a job we had publicly
+ * called our own error — which is the single most expensive sentence anyone could write
+ * about this company. Same argument that moved `isCorrected` here in Step 6.
+ */
+export const isAgentError = (outcome: BookingOutcome): boolean => {
+  const label = effectiveLabel(outcome);
+  return label === null || label === "agent_error";
+};
+
+/**
+ * One row per booking: the last thing we saw.
+ *
+ * The poller re-reads each job at 24h, 72h, and 7d, so one corrected booking arrives as
+ * up to three `BookingOutcome` rows. Counting rows put `correctionRate` above 1.0 —
+ * a value `ReliabilityMetricsSchema` rejects outright (Step 2, surprise #5) — and it
+ * would bill a contractor three times for one job. Ordered by `observedAt` rather than
+ * array position, because a cron guarantees no ordering.
+ *
+ * A contractor who fixed an address and then cancelled outright has told us the booking
+ * failed once.
+ */
+export function latestPerBooking(
+  outcomes: readonly BookingOutcome[],
+): BookingOutcome[] {
+  const latest = new Map<string, BookingOutcome>();
+  for (const outcome of outcomes) {
+    const seen = latest.get(outcome.bookingId);
+    if (!seen || Date.parse(outcome.observedAt) >= Date.parse(seen.observedAt)) {
+      latest.set(outcome.bookingId, outcome);
+    }
+  }
+  return [...latest.values()];
+}

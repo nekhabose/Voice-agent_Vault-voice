@@ -8,21 +8,23 @@
 
 ---
 
-## Current status (verified 2026-07-11, after Step 6's core)
+## Current status (verified 2026-07-11, after Step 7's core)
 
 The domain core is built and green, the call runtime that binds it to a voice
 session is tested end to end without a phone, the eval harness drives extraction
-through the *real* `SlotExtractor` port, and the wedge now has a *why* beside its
-*what*: correction triage, a human audit, and the rule that decides which number
-we are allowed to publish. Everything below was re-run, not copied from a previous
-claim.
+through the *real* `SlotExtractor` port, the wedge has a *why* beside its *what*
+(correction triage, a human audit, and the rule that decides which number we are
+allowed to publish) — and as of Step 7 it has a **database that actually runs**:
+tenant isolation, the migrations, `pgvector`, and every store are exercised against
+a real Postgres in the PR suite. Everything below was re-run, not copied from a
+previous claim.
 
 | Check | Result |
 |---|---|
-| `npm test` | **708 passed**, 20 files |
+| `npm test` | **774 passed**, 25 files |
 | `npm run typecheck` | clean |
-| `npm run test:coverage` | **99.29%** lines (thresholds: 90/90/85/90) |
-| `cd apps/web && npm run build` | builds, 3 routes |
+| `npm run test:coverage` | **99.31%** lines (thresholds: 90/90/85/90) |
+| `cd apps/web && npm run build` | builds, 6 routes |
 
 **Built.** `contracts`, `conversation` (SlotBook + the seven-state machine), `safety`
 (deterministic classifier, labeled corpus, `recall === 1.0`), `validators`, `extraction`
@@ -44,7 +46,11 @@ packages: `triage` (call site #5, the correction classifier behind the `Correcti
 vendor boundary the three model call sites share — the outage taxonomy and the wire-level test
 transport).
 
-**Not built.** No telephony, no realtime model, no auth, no billing, no compliance work. **The
+Step 7 adds `billing` (per booked job, and it refuses our own money when we got the booking
+wrong), gives `db` a client, RLS, and the Postgres stores, and gives `apps/web` the two crons
+that finally call the poller and the nightly triage pass.
+
+**Not built.** No telephony, no realtime model, no auth *provider*, no compliance work. **The
 `Effect[]` seam is bound and tested, but only against fakes** — `apps/agent` is an honest
 Python scaffold with no LiveKit room, no SIP trunk, and no GPT-Realtime (Step 4.2/4.6), and
 `CallRuntime` has never driven a real microphone. `GoogleGeocoder` has never spoken to a live
@@ -54,16 +60,21 @@ to a live model** — `AnthropicExtractor`, `AnthropicTriager`, and `AnthropicFa
 real code against the real SDK, proven offline through an injected `fetch` against hand-authored
 fixtures. The eval harness binds the real `SlotExtractor` port (Step 5.1); its nightly arm has
 still never called a live model, and re-recording the fixtures plus the live prompt-cache
-assertion is task 5.5. The `db` schema has never been applied to a
-Postgres: `drizzle-kit generate` needs no database and `migrate` does, and no Neon instance
-exists (Step 7) — which also means **`faq_entries` has no rows, `pgvector` has never been
-queried, and no real `Embedder` is bound** (`HashingEmbedder` is a deterministic stand-in with no
-semantics). **`observeOutcome()` produces the `BookingOutcome[]` that `computeMetrics()`
-consumes, but it has only ever read a `FakeTransport`** — no live Housecall Pro sandbox has been
-polled (task 4.10). **Nothing schedules the nightly triage pass, and no human has ever audited a
-label** (Step 7 gives it a cron and a database; the audit is a weekly ritual, not a function
-call). **No sentence in `packages/utterance/src/catalog.ts` has been spoken aloud by a TTS
-engine, and none has been read by a lawyer** (Step 8 gates the second; Step 4 the first).
+assertion is task 5.5. **`observeOutcome()` has only ever read a `FakeTransport`** — no live
+Housecall Pro sandbox has been polled (task 4.10). **No sentence in
+`packages/utterance/src/catalog.ts` has been spoken aloud by a TTS engine, and none has been read
+by a lawyer** (Step 8 gates the second; Step 4 the first).
+
+**The database is the one thing here that is no longer hypothetical, and it is worth being
+precise about what that does and does not mean.** The schema, both migrations, the RLS policies,
+the column grants, `pgvector`'s cosine ranking, and every Postgres store now run against a *real*
+Postgres in the PR suite — in-process, no credential, no network. So tenant isolation is
+**proven**, not asserted. What remains unproven is one `Pool` and a URL: `neonDatabase()` has
+never connected to a live Neon (task 7.7), `faq_entries` holds no production rows, and
+**`HashingEmbedder` is still the only `Embedder` bound** — it has no semantics, so
+`SIMILARITY_FLOOR` is still calibrated against nothing (task 6.6, which needs an embedding
+*credential*, not a database). **The weekly human audit is still a ritual nobody has performed**
+(6.3): it now has a cron, a store, and a dashboard, and it has never had a person.
 
 ### Progress board
 
@@ -79,17 +90,19 @@ person to open this file will trust it, and be wrong.
 | 3 | Utterance generation (build time) | ✅ **Done** — 2026-07-09 |
 | 4 | `apps/agent` — one live call | 🟡 **Core built** — 2026-07-10 (live-call gate deferred: 4.2/4.6/4.10) |
 | 5 | Eval over the real path | 🟡 **Core built** — 2026-07-10 (nightly/SIP arms deferred: 5.2/5.3/5.5) |
-| 6 | Correction triage + FAQ | 🟡 **Core built** — 2026-07-11 (live/DB-gated tails: 6.1's live run, 6.3's weekly ritual, 6.4's `pgvector` + a real embedder) |
-| 7 | Product — auth, tenancy, onboarding, billing | ⬜ Not started ← **next** |
-| 8 | Compliance | ⬜ Not started |
+| 6 | Correction triage + FAQ | 🟡 **Core built** — 2026-07-11 (live-model tail: 6.1's live run, 6.3's weekly ritual, 6.6's real embedder) |
+| 7 | Product — auth, tenancy, onboarding, billing | 🟡 **Core built** — 2026-07-11 (credential-gated tails: 7.5 onboarding/OAuth, 7.6 Clerk, 7.7 the live Neon) |
+| 8 | Compliance | ⬜ Not started ← **next** |
 | 9 | Publish the number | ⬜ Not started |
 
 Not on the critical path, and unresolved: the `AgenticArm` A/B (§11), and
 `claude-haiku-4-5` vs `claude-sonnet-5` for extraction, scored on critical-slot accuracy.
 
-**Six questions no step so far could settle without a credential or a human.** Steps 1–6
+**Six questions no step so far could settle without a credential or a human.** Steps 1–7
 each built the real code against the real interface and hand-authored the strings, because no
-vendor account existed. Named so they cannot be quietly forgotten:
+vendor account existed. (Step 7 answered the *seventh* — "does the tenancy model actually hold"
+— because Postgres, alone among our vendors, will run in-process. The rest still wait on a key.)
+Named so they cannot be quietly forgotten:
 
 - Whether the prompt-cache prefix is large enough to cache at all (§10.1) — **task 5.5**.
 - Whether the committed extraction fixtures match what `claude-sonnet-5` actually emits —
@@ -102,7 +115,9 @@ vendor account existed. Named so they cannot be quietly forgotten:
   publication rule (`publishedCorrectionRate()`) already assumes the answer is "not yet".
 - Whether the retrieval floor and the embedder we eventually bind can tell "do you charge for an
   estimate" from "do you charge for a callout". `HashingEmbedder` cannot; nothing has been
-  measured — **task 6.6**, with the database.
+  measured — **task 6.6**. Step 7 built the `pgvector` half (`PgVectorFaqIndex`, tested against a
+  real Postgres, and it cannot be made to leak one tenant's answers to another's caller). The
+  embedder is what is left, and it needs a *credential*, not a database.
 - Whether the AI disclosure in `catalog.ts` satisfies counsel. It is committed, verbatim, and
   pinned by an exact-equality test — but "reviewed" is a signature, not an assertion, and no
   human has signed. **Step 8**, and it gates launch rather than code.
@@ -303,7 +318,7 @@ in CI, and the build fails on drift.
 ```
 ledgerline/
 ├── apps/
-│   ├── web/                    Next.js — dashboard, onboarding, Twilio webhooks
+│   ├── web/                    Next.js — dashboard, reliability page, the two crons ✅
 │   └── agent/                  Python — LiveKit worker scaffold + generated Pydantic  🟡 [Step 4.2/4.6]
 ├── packages/
 │   ├── contracts/              Zod schemas → JSON Schema → Pydantic (codegen + drift guard) ✅
@@ -318,11 +333,18 @@ ledgerline/
 │   ├── crm/                    CrmAdapter + Housecall Pro + Jobber + readJob       ✅
 │   ├── runtime/               CallRuntime — the Effect[] binding (VoiceSession port) ✅
 │   ├── workflows/              Saga + booking transaction + outcome poller + triage batch ✅
+│   ├── billing/                Per booked job — and not for a booking we got wrong  ✅
 │   ├── telemetry/              Reliability metrics + latency budgets + the publication rule ✅
-│   ├── db/                     Drizzle schema + migrations (Neon, pgvector)        ✅
+│   ├── db/                     Drizzle schema + migrations + RLS + the Postgres stores ✅
 │   └── eval/                   Simulated-caller harness + scoring
 └── plan.md, idea.md, CLAUDE.md
 ```
+
+**`packages/db` is the only package whose vendor is real.** Postgres compiles to WebAssembly, so
+the schema, both migrations, the RLS policies, the column grants, and `pgvector`'s cosine ranking
+are exercised against an *actual* Postgres in the PR suite — no credential, no network, no
+transcribed wire shapes. Every other vendor in this tree is stubbed behind a port because we
+could not afford to guess at its wire format. This one we do not have to guess about.
 
 **Three packages speak to Anthropic, and none of them owns the vendor.** `extraction` (#2), `faq`
 (#3), and `triage` (#5) each hold their own prompt, tool, and outcome type; what a `429` *means*,
@@ -1035,14 +1057,138 @@ correction, a human auditor, and a `pgvector` query.
 
 ---
 
-### Step 7 — Product (3–4 weeks)
+### Step 7 — Product 🟡 **Core built (2026-07-11); credential-gated tails deferred**
 
-Clerk auth. Tenant isolation via Postgres RLS. Per-tenant number provisioning. Onboarding:
-connect Housecall Pro (OAuth), draw the service area, set hours, define job types, record a
-custom greeting. Dashboard: live calls, transcripts with audio scrub, bookings, escalations,
-**and the reliability numbers as the pitch, not a tab.** Billing per booked job rather than per
-minute — align our incentive with theirs. Jobber and ServiceTitan through the existing contract
-suite.
+Every step so far ended with the same sentence: *this is real code behind a real port, and it
+has never met the vendor.* Step 7 is the first one where **the vendor came to us.** Postgres
+compiles to WebAssembly, so `packages/db` no longer has to guess: the schema, both migrations,
+the RLS policies, the column grants, `pgvector`'s cosine operator, and every store run against
+an *actual* Postgres in the PR suite, with no credential and no network. That is a strictly
+stronger claim than any other binding in this repo can make, and it is available only because
+Postgres is the one vendor that will run in-process.
+
+The gates that remain are the ones a database cannot supply: a Clerk key, a Housecall Pro
+developer account, a Twilio number, and a Neon URL.
+
+| # | Task | Detail | |
+|---|---|---|---|
+| 7.1 | Tenant isolation via Postgres RLS | Migration `0002`. Every tenant-scoped table `ENABLE`d **and** `FORCE`d, policies on `current_setting('app.tenant_id')`, and a dedicated `ledgerline_app` role that owns nothing — see surprise #1, which is the reason the role exists at all. `TENANT_SCOPED_TABLES` is the spec and `rls.test.ts` checks the database against it, so a new table with no policy fails the build. | ✅ |
+| 7.2 | `packages/db` gains a client | `withTenant(db, tenantId, fn)` — one transaction, `set_config(..., is_local => true)`. Surprise #2 is why it is not a `SET`. `packages/db` was schema-only until now on the honest grounds that "a pool nobody opens is a lie about what is built"; it is not a lie any more. | ✅ |
+| 7.3 | The Postgres stores, and the cron that finally calls them | `PgSnapshotStore`, `PgOutcomeStore`, `PgBookingStore`, `PgTriageStore`/`PgAuditStore`, `PgVectorFaqIndex` — every port earlier Steps left with a double and a note saying "the real one is Step 7's". `runOutcomePolls()` in `workflows` is the cron body; `apps/web/app/api/cron/*` and `vercel.json` are the schedule. **`bookings.completed_polls` is now a column somebody increments.** | ✅ |
+| 7.4 | Billing per booked job | `packages/billing`. And the rule that makes the wedge survivable: **we do not bill for a booking we got wrong** — including one nobody has classified yet. See surprise #4. | ✅ |
+| 7.5 | Onboarding: Housecall Pro OAuth, service area, hours, job types, greeting | The *provider* is already a column and `crmForTenant()` switches on it, so a Jobber shop and a Housecall Pro shop poll through the same code. The credential is the gap: no developer account, so no OAuth flow, so `crm_credentials_enc` holds a sentinel and `crmForTenant()` **refuses** rather than falling back to another tenant's token. | ⬜ |
+| 7.6 | Clerk auth | The seam is built (`TenantResolver`), and every route funnels through it into `withTenant()`. The binding is eight lines and needs a key. Isolation does not depend on it: it lives in the database, so swapping the identity provider changes one file and nothing below it. | ⬜ |
+| 7.7 | A live Neon instance | `neonDatabase()` ships and has never connected. It is the only thing in `packages/db` that has not met a real Postgres. Applying the migrations to a real Neon also unblocks **6.6** (a real embedder, and `SIMILARITY_FLOOR` calibrated against something) and **4.10** (the live CRM sandbox). | ⬜ |
+
+**Exit (met for the core, and the gap is named).** Tenant isolation is proven — not asserted —
+against a real Postgres: one contractor cannot read another's calls, cannot write into another's
+tenant, cannot reach another's FAQ answers through the retrieval index, and an unscoped
+connection sees *nothing at all*. The poller and the nightly triage pass have a schedule. Billing
+exists and refuses our own money. What has never happened: a Clerk session, an OAuth handshake, a
+Neon URL, and a contractor.
+
+**Result:** 774 tests (was 708), 99.31% coverage, typecheck clean, `apps/web` builds (6 routes,
+was 3).
+
+**Mutation-tested, all three caught:** making `set_config` session-level instead of
+transaction-local (the tenant leaks to the next request on a pooled connection — exactly one test
+catches it); billing an unclassified correction; and letting a failed poll consume the poll it
+still owes.
+
+#### Four things came out different from what this Step predicted
+
+1. **"Tenant isolation via Postgres RLS" is not what protects you. The connection role is.**
+   This is the finding that shaped the step, and it is a fact about Postgres that a deployment
+   gets wrong *silently*.
+
+   Postgres exempts a table's **owner** from row-level security unless the table is `FORCE`d —
+   and exempts a **superuser** even then. Neon's default connection string is the owner. So the
+   obvious, documented, everybody-does-it deployment — write the policies, take the URL Neon
+   hands you, ship — produces a database with a complete set of RLS policies that **do
+   nothing**. There is no error. There is no warning. Every query returns every tenant's rows,
+   and every test written against that connection passes with the policies deleted.
+
+   The mitigation is a role that owns nothing: migration `0002` creates `ledgerline_app`,
+   `FORCE`s RLS on all fourteen tables, and grants it only DML. `DATABASE_URL` must name *it*.
+   And because "we must remember to use the right role" is exactly the kind of thing a team
+   forgets, `rls.test.ts` **pins the bypass**: there is a passing test asserting that the owner
+   sees both tenants' rows. It reads like a bug. It is the documentation.
+
+2. **A pooled connection makes `SET app.tenant_id` a cross-tenant read with no bug in any
+   query.** The natural way to scope a request is to set the GUC when you get the connection.
+   But the connection is *pooled*: the setting outlives the request that made it, and the next
+   request — a different contractor — inherits it. Nothing in any query is wrong. The `WHERE`
+   clauses are right, the policies are right, and the data is somebody else's.
+
+   So the tenant is set with `set_config(..., is_local => true)` **inside a transaction**, where
+   it dies whether the transaction commits or rolls back. `SET LOCAL` cannot take a bind
+   parameter, which is the real reason it is the function form rather than the statement.
+
+   This also forced the driver: **`drizzle-orm/neon-http` cannot be used**, because it does not
+   support transactions at all — and no transaction means no `is_local`, which means no
+   `app.tenant_id`, which means every policy evaluates against NULL. The HTTP driver is the one
+   Vercel's docs reach for first. The WebSocket pool is the price of row-level security, and
+   row-level security is the price of multi-tenancy.
+
+3. **RLS needs `tenant_id` on every table, denormalized — and the denormalization is enforced by
+   a foreign key, not by review.** A policy is a `USING` clause evaluated per row. It can afford
+   `tenant_id = app_current_tenant()`. It cannot afford `EXISTS (SELECT … JOIN … JOIN …)` three
+   levels up from `outcomes` to the owning tenant. So `tenant_id` is denormalized onto
+   `call_turns`, `slots`, `escalations`, `bookings`, `job_snapshots`, and `outcomes`.
+
+   Denormalized data can disagree with its source, and a row whose `tenant_id` says one thing
+   while its parent call says another is a row RLS hands to the wrong contractor. So it is not
+   allowed to disagree: every child declares a **composite foreign key** on `(parent_id,
+   tenant_id)`, and every parent a matching unique constraint. Filing a call turn under the
+   wrong tenant does not fail a code review — it fails the database. That is
+   `TriageStore.classify`'s move (a guarantee carried by the type system) done in DDL.
+
+   And the same reasoning produced a *second* database-level guarantee we did not plan: the app
+   role holds `UPDATE` on `outcomes`' **seven derived columns and nothing else**, and no `DELETE`
+   at all. Step 6.2 made "the raw diff is never written" a type error. It is now also a
+   permission error, which holds for a raw `db.execute()` that never went near the port. A model
+   grading our own homework must not be able to erase the homework, and one mechanism guarding
+   that is one mechanism away from none.
+
+4. **Billing per booked job is not the incentive alignment. Refusing to bill for a booking we got
+   wrong is.** "Per booked job rather than per minute" only fixes the obvious perversion — that
+   per-minute pricing pays us to keep a homeowner on the phone. It leaves a worse one standing:
+   if we bill for every job that reaches the CRM, then **a booking the contractor had to fix is
+   still revenue**, and our own error rate becomes an income stream. We are the company that
+   publishes its error rate. Those two facts cannot both be true of one business.
+
+   So `billable = !cancelled && !isAgentError(outcome)` — and `isAgentError` is imported from
+   `contracts` rather than restated, because `telemetry` computes the number we *publish* from
+   the same predicate. If they drifted, we would invoice a contractor for a booking we had
+   publicly called our own mistake. `invoice.test.ts` asserts the identity directly.
+
+   The consequence is the good part. `isAgentError` counts an **unclassified** correction as our
+   fault (Step 6's inversion), so a triage backlog, a declined verdict, an Anthropic outage, or a
+   cron nobody wired up now costs us *money* and not merely a worse published number. Every
+   failure mode of this pipeline has a price, and we pay it. `Invoice.staleTriage` reports how
+   much, because the first symptom of a broken cron must not be a quiet drop in revenue.
+
+**Also settled, and worth not re-litigating:**
+
+- **The store ports moved into `contracts`** — `SnapshotStore`, `TriageStore`, `AuditStore`,
+  `FaqIndex`, `Embedder`, plus the new `OutcomeStore` and `BookingStore`. `packages/db` cannot
+  implement a port it would have to depend on `workflows` to see, and `db → workflows → crm`
+  points the graph backwards. Same argument as `Effect` (Step 3) and `HttpTransport` (Step 4): a
+  port that crosses a package boundary belongs in the spine. The in-memory doubles stay where
+  they are; they are test doubles, not contracts.
+- **`isAgentError` and `latestPerBooking` moved into `contracts` too**, for the reason in
+  surprise #4. Three packages now ask "was this our fault", and they must not be able to disagree.
+- **The poll *schedule* stays in `workflows`, not in the store.** `BookingStore.unfinished()`
+  answers a storage question ("which bookings still owe a poll"); `nextDuePoll()` answers the
+  product one ("is one due yet"). A store that knew `POLL_OFFSETS_MS` would put a product
+  decision — when a correction is likely to land — inside a SQL file.
+- **Vercel Cron sends `GET`.** A route exporting only `POST` deploys, schedules, and never fires,
+  and the symptom is a correction rate of zero — precisely the number a dishonest vendor would
+  report. The safety of a mutating `GET` rests entirely on the `CRON_SECRET` check, and a missing
+  secret is a **refusal**, never a bypass.
+- **`drizzle-kit generate` emitted a migration that does not apply.** It ordered every composite
+  foreign key *before* the unique constraint it references. We know because we ran it. Nothing
+  short of running it would have found that, and until this Step nothing could.
 
 ---
 
@@ -1502,20 +1648,30 @@ through the real `SlotExtractor` port (`FakeExtractor` in the PR suite, `Anthrop
 the nightly arm); read surprise #1 — a fill now *scripts the fake*, it is not a value baked into
 the scenario.
 
-1. **Step 6 — correction triage + FAQ.** ← you are here. Classify each diff
-   `agent_error | business_change | enrichment` in a nightly `claude-opus-4-8` pass; only
-   `agent_error` counts against `correctionRate`. Store the raw diff unclassified forever, publish
-   the human-audit agreement rate, and put FAQ retrieval (`pgvector`) behind a filler utterance.
-   You need corrections before you can classify them, which is why the raw diff (Step 2) came first.
-2. **The credentialed tails of Steps 4 and 5, whenever the accounts exist.** 4.2 (Twilio → SIP →
-   LiveKit), 4.6 (GPT-Realtime), 4.10 (live Housecall Pro sandbox), 5.2 (LLM caller personas),
-   5.3 (real-SIP barge-in/turn-take), 5.5 (the live prompt-cache measurement). Each is built to
-   the port and waiting for a key; none is on the critical path to Step 6.
+~~Step 6 — correction triage + FAQ.~~ Core built 2026-07-11. Read surprise #1 before you touch
+`correctionRate`: "only `agent_error` counts against it" was the most dangerous sentence in this
+plan, and it is now two numbers, because every failure mode of triage must push the published
+figure *up*.
+~~Step 7 — product: tenancy, the crons, billing.~~ Core built 2026-07-11. Read surprise #1
+before you touch the database connection: **RLS policies do nothing when you connect as the
+owner**, which is the role Neon hands you by default, and there is a passing test asserting the
+bypass so that nobody mistakes the policies for the guarantee.
+
+1. **Step 8 — compliance.** ← you are here. It gates revenue, not code, and its single hardest
+   item is a signature: no lawyer has read `AI_DISCLOSURE`. It is committed, verbatim, and pinned
+   by an exact-equality test, which is not the same as reviewed. Two-party-consent recording by
+   state, keyed off the caller's area code with a conservative default, is the other half.
+2. **The credentialed tails, whenever the accounts exist.** 4.2 (Twilio → SIP → LiveKit), 4.6
+   (GPT-Realtime), 4.10 (live Housecall Pro sandbox), 5.2 (LLM caller personas), 5.3 (real-SIP
+   barge-in/turn-take), 5.5 (the live prompt-cache measurement), 6.5 (the human audit's agreement
+   rate), 6.6 (a real embedder), 7.5 (Housecall Pro OAuth), 7.6 (Clerk), 7.7 (a live Neon). Each
+   is built to the port and waiting for a key.
 
 The uncertain parts are retired: the model integration (Step 1), the wedge computation (Step 2),
-the committed catalog (Step 3), the whole conversational control loop (Step 4's core), and the
-extraction seam under the eval (Step 5's core). What is left in Steps 4 and 5 is plumbing to
-hardware and credentials, not risk.
+the committed catalog (Step 3), the whole conversational control loop (Step 4's core), the
+extraction seam under the eval (Step 5's core), the triage pipeline and its publication rule
+(Step 6's core), and — proven against a real Postgres rather than argued — tenant isolation
+(Step 7's core). What is left is plumbing to hardware and credentials, not risk.
 
 **Before you finish any step:** update the progress board at the top of this file and the
 step's own heading, in the same commit as the code. If you changed a boundary or a principle,

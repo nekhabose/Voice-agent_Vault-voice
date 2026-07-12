@@ -3,9 +3,14 @@ const nextConfig = {
   // The workspace packages ship TypeScript source, not build output. One less
   // build step, and the dashboard always reflects the real domain types.
   transpilePackages: [
+    "@ledgerline/billing",
     "@ledgerline/contracts",
     "@ledgerline/conversation",
+    "@ledgerline/crm",
+    "@ledgerline/db",
     "@ledgerline/telemetry",
+    "@ledgerline/triage",
+    "@ledgerline/workflows",
   ],
 
   webpack: (config) => {

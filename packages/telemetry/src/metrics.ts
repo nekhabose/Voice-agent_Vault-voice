@@ -1,7 +1,8 @@
 import {
   CONTAINED_OUTCOMES,
-  effectiveLabel,
+  isAgentError,
   isCorrected,
+  latestPerBooking,
   type BookingOutcome,
   type CallRecord,
   type CallTurn,
@@ -82,45 +83,11 @@ export function computeMetrics(input: MetricsInput): ReliabilityMetrics {
 }
 
 /**
- * A booking is "corrected" if the contractor cancelled it or edited any field
- * (`isCorrected`, in `contracts`). Either way we got it wrong; counting them
- * separately would let us report the flattering half.
- *
- * **Counted per booking, not per outcome.** The poller re-reads each job at 24h,
- * 72h, and 7d, so one corrected booking arrives as up to three `BookingOutcome`
- * rows. Counting rows would put `correctionRate` above 1.0 — a number that
- * `ReliabilityMetricsSchema` rejects and that no reader would believe. The
- * latest observation wins: a contractor who fixed an address and then cancelled
- * outright has told us the booking failed once.
+ * `latestPerBooking` and `isAgentError` moved into `contracts` in Step 7, because
+ * `packages/billing` now asks the same two questions and a disagreement between them
+ * would invoice a contractor for a booking we had publicly called our own error. Same
+ * argument that moved `isCorrected` and `effectiveLabel` there in Step 6.
  */
-function latestPerBooking(outcomes: readonly BookingOutcome[]): BookingOutcome[] {
-  const latest = new Map<string, BookingOutcome>();
-  for (const outcome of outcomes) {
-    const seen = latest.get(outcome.bookingId);
-    if (!seen || Date.parse(outcome.observedAt) >= Date.parse(seen.observedAt)) {
-      latest.set(outcome.bookingId, outcome);
-    }
-  }
-  return [...latest.values()];
-}
-
-/**
- * **An untriaged correction is an agent error until someone shows otherwise.**
- *
- * This one line is what keeps Step 6 from being a way to make the number look
- * better. `null` — the nightly pass has not run, the model declined, Anthropic was
- * down, the cron is broken — reads as *our fault*, so every failure mode of the
- * triage pipeline pushes `agentErrorRate` up toward the raw correction rate. A
- * classifier can only ever *lower* the published number, and only by producing an
- * argument a human auditor can check.
- *
- * The inverse — unclassified means "not our fault" — is the missed webhook wearing
- * its third hat (plan, §7): a metric whose failure mode is "looks perfect".
- */
-const isAgentError = (outcome: BookingOutcome): boolean => {
-  const label = effectiveLabel(outcome);
-  return label === null || label === "agent_error";
-};
 
 /* -------------------------------------------------------------------------- */
 /* What we are allowed to publish                                              */

@@ -375,7 +375,7 @@ export const NEEDS_ATTENTION = CALLS.filter(
  * This is the only reliability number that matters, and it is why the dashboard
  * shows a correction rate rather than a satisfaction score.
  */
-const OUTCOMES: readonly BookingOutcome[] = BOOKED.map((call, index) => ({
+export const OUTCOMES: readonly BookingOutcome[] = BOOKED.map((call, index) => ({
   bookingId: `booking-${call.record.id}`,
   cancelled: false,
   correctedFields:

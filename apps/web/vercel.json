@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/cron/poll-outcomes",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/triage",
+      "schedule": "0 2 * * *"
+    }
+  ]
+}

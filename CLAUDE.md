@@ -104,11 +104,12 @@ packages/
   crm/           CrmAdapter interface + Housecall Pro + Jobber. Writes and reads.
   runtime/       CallRuntime. The Effect[] binding: caller ASR → machine → VoiceSession.
   workflows/     Saga engine + post-call booking transaction + the outcome poller + triage batch.
+  billing/       Per booked job — and never for a booking we got wrong.
   telemetry/     Reliability metrics + latency/turn-taking budgets + the publication rule.
-  db/            Drizzle schema + migrations. Schema only — no client, no pool.
+  db/            Drizzle schema + migrations + RLS + the tenant-scoped client + the Postgres stores.
   eval/          Simulated-caller harness. Scenarios run in CI, over the real SlotExtractor port.
 apps/
-  web/           Next.js contractor dashboard.
+  web/           Next.js dashboard, the reliability page, and the two crons.
   agent/         Python LiveKit worker scaffold + generated Pydantic. No hardware yet (Step 4.2/4.6).
 ```
 
@@ -124,8 +125,9 @@ contracts ──► conversation ──► validators ──► eval
     ├──► utterance ────────────────────┤            (runtime binds it in tests)
     ├──► crm ──► workflows ┄┄► {telemetry, triage}  (┄ = test-only)
     ├──► runtime ┄┄► {extraction, faq, utterance, telemetry}  (runtime deps: conversation, safety, validators)
+    ├──► billing ──► web
     ├──► telemetry ──► web
-    └──► db
+    └──► db ──► web        (db ┄┄► faq: test-only, to prove both FaqIndex impls rank alike)
 
 anthropic ──► {extraction, faq, triage}    (the SDK; depends on nothing of ours)
 ```
@@ -178,8 +180,28 @@ where they are produced.
 **not** emit `MachineEvent`, because a `SLOT_FILLED` carries a geocoder- and validator-checked
 value that only `CallRuntime` can construct (principle #3). Effects go down, raw speech comes up.
 
-`db` depends on `contracts` alone, and nothing depends on `db`. Every `pgEnum` is spread
-from a Zod schema rather than retyped, so the tables cannot drift from the domain.
+**`db` depends on `contracts` alone (plus its drivers), and only `apps/web` depends on `db`.**
+Every `pgEnum` is spread from a Zod schema rather than retyped, so the tables cannot drift from
+the domain. As of Step 7 it also holds the tenant-scoped client (`withTenant`), the RLS
+migration, and the Postgres stores — `PgSnapshotStore`, `PgOutcomeStore`, `PgBookingStore`,
+`PgTriageStore`/`PgAuditStore`, `PgVectorFaqIndex`. It carries a **devDependency on `faq`**, used
+in one test to prove `PgVectorFaqIndex` and `InMemoryFaqIndex` rank identically; do not promote
+it.
+
+**The store ports live in `contracts`, not in the packages that consume them.** `SnapshotStore`,
+`OutcomeStore`, `BookingStore`, `TriageStore`, `AuditStore`, `FaqIndex`, and `Embedder` are all
+in `contracts/src/stores.ts`. They used to live in `workflows` and `faq`, which was right while
+the only implementations were in-memory doubles beside them — but `db` cannot implement a port it
+would have to depend on `workflows` to see, and `db → workflows → crm` points the graph
+backwards. Same rule as `Effect` (Step 3) and `HttpTransport` (Step 4): **a port that crosses a
+package boundary belongs in the spine.** `workflows` and `faq` re-export them from where they are
+used, exactly as `machine.ts` re-exports `Effect`. The in-memory doubles stay put; they are test
+doubles, not contracts.
+
+`isAgentError` and `latestPerBooking` are in `contracts` for the same class of reason
+`isCorrected` is: **three packages now ask "was this booking our fault"** — `telemetry` publishes
+the number, `workflows` decides what to send the model, and `billing` decides whether to *charge*.
+A disagreement between them invoices a contractor for a booking we publicly called our own error.
 
 `workflows ┄┄► {telemetry, triage}` are **devDependencies**. `outcomes.test.ts` drives a
 hand-edited job body through the real adapter, the real poller, and the real `computeMetrics()` —
@@ -385,6 +407,54 @@ the batch; `packages/telemetry` decides what may be said out loud. Five rules:
   sample is chosen by hashing the booking id — stable, so a disliked week cannot be
   re-rolled, and assigned before the outcome existed, so it cannot be steered.
 
+### 6. Tenant isolation is a property of the database, not of our queries
+
+`packages/db/migrations/0002`, and `rls.test.ts` is the evidence. Every tenant-scoped table
+has row-level security `ENABLE`d **and** `FORCE`d, with a policy on
+`current_setting('app.tenant_id')`. The stores also pass a tenant id explicitly. That is
+deliberate redundancy: the `WHERE` clause is a habit, and habits lapse — a missing one is a
+distracted afternoon away, and its consequence is a plumber reading another plumber's calls.
+
+- **The application must not connect as the table owner.** Postgres exempts a table's owner
+  from RLS unless the table is FORCEd, and exempts a **superuser even then**. Neon's default
+  connection string is the owner. Connect as it and every policy in `0002` does exactly
+  nothing — no error, no warning, and every test written against that connection passes with
+  the policies deleted. `DATABASE_URL` names `ledgerline_app` (`APP_ROLE`), which owns nothing.
+  There is a **passing test asserting the owner sees both tenants' rows**. It reads like a bug.
+  It is the documentation, and deleting it is how the next person concludes the policies alone
+  are the guarantee.
+- **The tenant is set per *transaction*, never per session.** `withTenant()` uses
+  `set_config(..., is_local => true)`. A session-level `SET` on a pooled connection hands the
+  next request the previous tenant's id — a cross-tenant read with no bug in any query. This is
+  also why the driver is `drizzle-orm/neon-serverless` and **not** `neon-http`: the HTTP driver
+  has no transactions, so it cannot scope anything.
+- **Denormalized `tenant_id` cannot disagree with its parent, and that is a foreign key.** RLS
+  needs `tenant_id` on `call_turns`, `slots`, `escalations`, `bookings`, `job_snapshots`, and
+  `outcomes` — a per-row `USING` clause cannot afford a three-level join. Each carries a
+  **composite FK** on `(parent_id, tenant_id)`. A row filed under the wrong tenant fails the
+  database, not a code review.
+- **`TENANT_SCOPED_TABLES` is the specification, and the test reads the database back against
+  it.** Add a table with a `tenant_id` and forget its policy: the suite fails.
+- **The raw diff is append-only by *privilege*, as well as by type.** `ledgerline_app` holds
+  `UPDATE` on `outcomes`' seven derived columns and nothing else, and no `DELETE` on `outcomes`
+  or `job_snapshots`. `TriageStore.classify` already could not express that edit (principle #5);
+  this holds for a raw `db.execute()` that never went near the port.
+
+### 7. We do not bill for a booking we got wrong
+
+`packages/billing`. Per booked job rather than per minute — but that only fixes the obvious
+perversion (per-minute pricing pays us to keep a homeowner on the phone). The worse one is that
+if we bill for every job that reaches the CRM, **our own error rate becomes an income stream**,
+and we are the company that publishes its error rate. Those two facts cannot both be true of one
+business.
+
+So `billable = !cancelled && !isAgentError(outcome)`, with `isAgentError` imported from
+`contracts` — the same predicate `telemetry` computes the published number from. And because
+an *unclassified* correction counts as our fault (principle #5), a triage backlog, a declined
+verdict, an Anthropic outage, or a cron nobody wired up each cost us **money**, not merely a
+worse published number. `Invoice.staleTriage` reports how much, because the first symptom of a
+broken cron must never be a quiet drop in revenue.
+
 ---
 
 ## Conventions
@@ -418,7 +488,7 @@ the batch; `packages/telemetry` decides what may be said out loud. Five rules:
 
 ## Testing
 
-708 tests, 99.29% line coverage, thresholds enforced in `vitest.config.ts`.
+774 tests, 99.31% line coverage, thresholds enforced in `vitest.config.ts`.
 
 | Layer | Where | What it proves |
 |---|---|---|
@@ -430,9 +500,12 @@ the batch; `packages/telemetry` decides what may be said out loud. Five rules:
 | The interested party | `triage` + `workflows` | The classifier declines without a rationale, declines a label outside the enum, and cannot write to `correctedFields` (a type error). An outage and a decline both leave the correction counting against us, and neither aborts the batch |
 | Contract | `crm` | **One suite, both adapters.** If it passes for Housecall Pro and Jobber, the interface is not a rename of one vendor's endpoints. `readJob` is asserted in our vocabulary against each vendor's |
 | Runtime | `runtime` | A whole call driven through the **real** machine, classifier, validators, and `Effect[]` binding against `FakeVoiceSession` — greeting/disclosure first, out-of-order-safe read-backs, correction revokes confirmation, extraction outage retries then escalates as `AGENT_ERROR`, hazard on an ASR partial short-circuits before the extractor, a caller's question detours through the FAQ (filler first, then the answer, then the same slot re-asked) without counting as an extraction failure, and every turn traced so `checkBudgets()` scores it (silence breaches `turnTakeRate`) |
-| Drift | `db` | Every `pgEnum` equals its Zod source, and the `pgvector` column is the width `contracts` declares. No database is touched; that needs Neon |
-| Integration | `workflows` | The booking saga, including the forced `create_job` failure and its compensating rollback. The outcome poller — a hand-edited job body through the real adapter, the real diff, and the real `computeMetrics()`. And the nightly triage batch, over real `BookingOutcome`s |
+| Drift | `db` | Every `pgEnum` equals its Zod source, and the `pgvector` column is the width `contracts` declares |
+| **Tenancy** | `db` | **A real Postgres**, in-process (PGlite), with the **real committed migrations** applied and connected as the **real app role**. One tenant cannot read another's rows, write into another's tenant, or reach another's FAQ answers through the retrieval index; an unscoped connection sees *nothing*; a session-level GUC leaks and is caught; a call turn filed under the wrong tenant fails the FK; the app role cannot `UPDATE corrected_fields` or `DELETE` an outcome. And a passing test asserts **the owner bypasses RLS entirely** — the fact a deployment gets wrong silently |
+| Store contract | `db` | The Postgres stores against the same expectations as the in-memory doubles, `PgVectorFaqIndex` ranking identically to `InMemoryFaqIndex`, and the SQL `WHERE` for "corrected" agreeing with `contracts`' `isCorrected()` over the same rows |
+| Integration | `workflows` | The booking saga, including the forced `create_job` failure and its compensating rollback. The outcome poller — a hand-edited job body through the real adapter, the real diff, and the real `computeMetrics()`. The nightly triage batch. And the cron: a CRM outage records nothing, consumes no poll, does not abort the batch, and the poll it owed is picked up by the next run |
 | The published number | `telemetry` | `agentErrorRate ≤ correctionRate`, always; an untriaged correction counts as our fault; the human overrules the model; and `publishedCorrectionRate()` refuses the classifier below 20 audited labels or 95% agreement |
+| The invoice | `billing` | We do not bill for a cancelled booking, an agent error, or **a correction nobody has classified**. The human auditor can move money in either direction. And an identity: every booking `telemetry` counts as an agent error is a booking `billing` waived — they import the same predicate, and this asserts they cannot drift |
 | End-to-end | `eval` | Simulated callers through the real machine, classifier, validators, **and `SlotExtractor` port** — a fill scripts `FakeExtractor`, and the value flows text → port → validators → machine; the nightly `AnthropicExtractor` binding is driven offline through an injected `fetch` |
 
 ### Rules
@@ -459,9 +532,14 @@ the batch; `packages/telemetry` decides what may be said out loud. Five rules:
   publishing the triaged rate without the human audit's licence (fails 5 tests),
   running the **FAQ detour before extraction** so a filled slot is spent on a
   question (fails 2), speaking an FAQ `entry_id` the model invented, and sampling
-  the weekly audit with `Math.random()` instead of hashing the booking id.
+  the weekly audit with `Math.random()` instead of hashing the booking id; and,
+  added in Step 7: making `withTenant`'s `set_config` **session-level instead of
+  transaction-local** (the tenant leaks to the next request on a pooled connection —
+  exactly one test catches it), **billing an unclassified correction**, and letting a
+  **failed poll consume the poll it still owes** (fails 2).
   **`TriageStore.classify` writing `correctedFields` is not on this list because it
-  is a type error, not a test failure** — which is the stronger guarantee.
+  is a type error, not a test failure** — which is the stronger guarantee. As of Step 7
+  it is *also* a Postgres permission error, which holds for a raw `db.execute()`.
 - The emergency classifier reports precision **and** recall over a labeled
   bilingual corpus every run (38 hazards, 28 routine calls). `recall === 1.0` is
   asserted. Precision is currently 1.0, with 3 documented deliberate false
@@ -499,11 +577,12 @@ Stated plainly, because a README that implies otherwise is marketing.
   vocabularies (`work_status`, `jobStatus`) and the deleted-job responses (`404`,
   `data.job: null`) are transcribed from documentation, not observed. Task 4.10
   verifies them, and Step 2's exit criterion, where the credential first exists.
-- **Nothing schedules the poller, and nothing schedules the nightly triage pass.**
-  `pollSchedule()` and `nextDuePoll()` say when a booking is due; `runTriage()` says
-  what to do with the corrections it finds. No cron calls either, and
-  `bookings.completed_polls` is a column nobody increments. That needs the database
-  and Vercel WDK — Step 7.
+- **The crons exist, and have never run.** `apps/web/app/api/cron/{poll-outcomes,triage}`
+  call `runOutcomePolls()` and `runTriage()`, and `vercel.json` schedules them (hourly,
+  and 02:00 nightly). `bookings.completed_polls` is now a column somebody increments.
+  What they have never had is a deployment: no Neon, no `CRON_SECRET`, no Vercel project.
+  Their bodies are tested (`poller.test.ts`, `triage.test.ts`, `stores.test.ts`); the
+  routes themselves are eight lines of wiring apiece and are not.
 - **The correction triager has never spoken to a live model, and no human has ever
   audited a label.** `packages/triage` is real code against the real SDK, proven
   offline through an injected `fetch` against **hand-authored** fixtures — the same
@@ -512,13 +591,15 @@ Stated plainly, because a README that implies otherwise is marketing.
   labels a real correction the way a human would, and that number — the agreement
   rate — is the licence to use the classifier at all. `publishedCorrectionRate()`
   already assumes the answer is "not yet" and quotes the raw rate (task 6.5).
-- **The FAQ has no index, no rows, and no real embedder.** `packages/faq` is
-  exercised end to end — retrieval, selection, verbatim answer, the runtime detour —
-  but over `InMemoryFaqIndex` and `HashingEmbedder`, a deterministic bag-of-words
-  stand-in with **no semantics**: "how much do you charge" and "what does it cost"
-  score zero against each other. `pgvector` has never been queried, `faq_entries` has
-  never held a row, and `SIMILARITY_FLOOR` (0.15) is calibrated against the fake, which
-  is to say against nothing. Task 6.6, with the database.
+- **The FAQ has an index now, and still has no real embedder.** `PgVectorFaqIndex` ships
+  and is tested against a real Postgres: it ranks identically to `InMemoryFaqIndex`, and it
+  cannot be made to speak one contractor's prices to another's caller even when handed the
+  wrong tenant id. But **`HashingEmbedder` is still the only `Embedder` bound** — a
+  deterministic bag-of-words stand-in with **no semantics**: "how much do you charge" and
+  "what does it cost" score zero against each other. So `SIMILARITY_FLOOR` (0.15) is still
+  calibrated against the fake, which is to say against nothing, and `faq_entries` has never
+  held a production row. **Task 6.6 needs an embedding credential, not a database** — which
+  is exactly why Step 7 could ship the index half and not this one.
 - **The `Effect[]` binding is built and tested, but only against fakes.**
   `packages/runtime`'s `CallRuntime` drives a whole call — greeting through
   booking — through the real machine, classifier, and validators, and it is the
@@ -547,14 +628,28 @@ Stated plainly, because a README that implies otherwise is marketing.
 - **`LlmUtterer` has no bound `Phraser`.** Nothing in the tree implements one;
   it is a drafting tool waiting for a credential, and `CachedUtterer` is what
   every code path actually uses.
-- **No database, only its schema.** `packages/db` is Drizzle tables and two
-  generated migrations — no client, no pool, no query helpers, because
-  `drizzle-kit generate` needs no database and nothing else in the tree has one.
-  Neither migration has ever been applied, including the `CREATE EXTENSION vector`
-  line that `0001` needs before `faq_entries` can exist. `apps/web/lib/demo-data.ts`
-  still seeds the dashboard and is typed against the real contracts, so the UI cannot
-  drift.
-- **No auth, no multi-tenancy, no billing.** Step 7.
+- **A real database, and no Neon.** This is the one entry that improved in kind rather
+  than degree. `packages/db` now has a client, RLS, and the Postgres stores, and all three
+  migrations are **applied to an actual Postgres in the PR suite** — PGlite, in-process, no
+  credential — so tenant isolation, the composite FKs, the column grants, and `pgvector`'s
+  cosine ranking are *proven* rather than asserted. What is unproven is one `Pool` and a
+  URL: `neonDatabase()` has never connected to a live Neon (task 7.7), and it is the only
+  thing in `packages/db` that has not met a real Postgres. `apps/web/lib/demo-data.ts` still
+  seeds the dashboard and is typed against the real contracts, so the UI cannot drift.
+- **No auth provider.** The seam is built — `TenantResolver`, and every route funnels
+  through it into `withTenant()` — but nothing binds Clerk, because no key exists (task
+  7.6). `envTenantResolver` names one tenant from the server's own environment, and
+  deliberately *not* from a header or a query parameter: a `?tenant=` a client could set is
+  not a stub for auth, it is a hole, and holes ship. **Isolation does not depend on the
+  identity provider**; it lives in the database, so binding Clerk changes one file.
+- **No onboarding, and no per-tenant CRM credential.** Housecall Pro OAuth needs a developer
+  account (task 7.5), so `tenants.crm_credentials_enc` holds a sentinel and the token comes
+  from the environment — correct for exactly one tenant and a *lie* for two. So
+  `crmForTenant()` **refuses** a stored credential rather than falling back to another
+  tenant's token: a cross-tenant CRM write is the worst bug this system could have, and it
+  must not be reachable by forgetting to finish a task.
+- **Billing computes an invoice and charges nobody.** `packages/billing` is real and fully
+  tested; there is no Stripe, no payment method, and no dunning.
 - **`eval` does not run over real SIP.** It answers "given what the caller said,
   does the system do the right thing?" The latency and barge-in numbers that are
   comparable to the literature require the SIP path.
@@ -644,10 +739,97 @@ Stated plainly, because a README that implies otherwise is marketing.
 - `packages/anthropic` holds `isOutage`/`outageReasonOrThrow` and the test transport, and
   **nothing else**. Do not put a prompt, a tool, or a domain type in it: the moment it
   knows about slots, it stops being the vendor boundary and becomes a second `contracts`.
+- **`DATABASE_URL` must name `ledgerline_app`, not Neon's default role.** The default is the
+  table owner, and Postgres exempts an owner from RLS unless the table is FORCEd — and a
+  *superuser* even then. Connect as it and every policy is decoration. See principle #6;
+  `rls.test.ts` has a passing test proving the bypass exists, and it is not a bug.
+- **`drizzle-orm/neon-http` cannot be used.** It has no transactions, so `withTenant()`
+  cannot `set_config(..., is_local => true)`, so `app.tenant_id` is never set, so every RLS
+  policy evaluates against NULL and every query returns nothing. It is the driver Vercel's
+  docs reach for first. Use `neon-serverless` (the WebSocket pool).
+- **PGlite is pinned to `0.4.x` and lives in the *root* devDependencies.** `0.5` dropped the
+  `./vector` export, and `drizzle-orm` resolves `@electric-sql/pglite` from its own location,
+  so a copy nested under `packages/db/node_modules` is invisible to it.
+- **`packages/db/src/testing.ts` is not exported from `index.ts`,** and must not be:
+  `apps/web` imports `@ledgerline/db` and has no business bundling a WebAssembly Postgres.
+- **`drizzle-kit generate` emits composite foreign keys *before* the unique constraints they
+  reference**, which Postgres rejects. Migration `0002` is hand-reordered, and its RLS section
+  is hand-written (drizzle emits no `FORCE`, no roles, no column-level grants). Run the
+  migrations after regenerating — `rls.test.ts` does, which is how we found this.
+- **`bookings.completed_polls` is incremented relatively (`= completed_polls + 1`), in the
+  database.** Reading it and writing `n + 1` means two overlapping cron runs both read 0 and
+  both write 1 — the booking is polled twice at 24h and never at 72h.
+- **A failed poll must not increment `completedPolls`.** The poll is still owed. That is the
+  entire reason the column is a counter rather than a timestamp, and a booking never polled is
+  a correction never counted — which reads as a *better* number than the truth.
+- **Vercel Cron sends `GET`.** A route exporting only `POST` deploys, schedules, and never
+  fires. A missing `CRON_SECRET` is a refusal, never a bypass — `if (!secret) return true`,
+  so it "works in development", is how the check ships disabled.
+- `packages/billing` must import `isAgentError` from `contracts` and never restate it.
+  `telemetry` computes the number we publish from the same predicate, and a drift between them
+  invoices a contractor for a booking we called our own error. `invoice.test.ts` asserts the
+  identity.
 
 ---
 
 ## Change log
+
+- **Step 7 (core) — tenancy, the crons, and billing that refuses our own money.** *(774 tests,
+  99.31% coverage, typecheck clean, `apps/web` builds — 6 routes.)* Every step before this one
+  ended with the same sentence: *real code, real port, never met the vendor.* Step 7 is the first
+  where **the vendor came to us.** Postgres compiles to WebAssembly, so the schema, all three
+  migrations, the RLS policies, the column grants, `pgvector`'s cosine ranking, and every store
+  now run against an *actual* Postgres in the PR suite — in-process, no credential, no network.
+  Tenant isolation is **proven**, not argued. `packages/db` gains a client (`withTenant`), the
+  Postgres stores, and migration `0002`; `packages/billing` is new; `apps/web` gains the two crons
+  that finally call the poller and the nightly triage pass, and a reliability page that leads with
+  the number we would least like to write.
+
+  **"Tenant isolation via Postgres RLS" is not what protects you — the connection role is.**
+  Postgres exempts a table's **owner** from row-level security unless the table is FORCEd, and
+  exempts a **superuser even then**. Neon's default connection string is the owner. So the
+  obvious deployment — write the policies, take the URL Neon hands you, ship — produces a
+  database with a complete set of RLS policies that **do nothing**, with no error and no warning,
+  where every test written against that connection passes with the policies deleted. Hence
+  `ledgerline_app`, which owns nothing; hence `FORCE` on all fourteen tables; and hence a
+  **passing test asserting that the owner sees both tenants' rows.** It reads like a bug. It is
+  the documentation, and it is there so nobody mistakes the policies for the guarantee.
+
+  **Two more things the database enforces that a review cannot.** *(1)* RLS needs `tenant_id`
+  denormalized onto six child tables, because a per-row `USING` clause cannot afford a
+  three-level join up to the owning tenant — so each one carries a **composite foreign key** on
+  `(parent_id, tenant_id)`, and a row filed under the wrong tenant fails the database rather than
+  a code review. *(2)* `ledgerline_app` holds `UPDATE` on `outcomes`' seven derived columns and
+  **nothing else**, and no `DELETE` at all: Step 6.2 made "the raw diff is never written" a type
+  error, and it is now also a permission error, which holds for a raw `db.execute()` that never
+  went near the port.
+
+  **And the tenant is scoped per transaction, never per session.** `set_config(..., is_local =>
+  true)`, because a pooled connection carries a session-level `SET` into the *next* request —
+  a cross-tenant read with no bug in any query. That also rules out `drizzle-orm/neon-http`, the
+  driver Vercel's docs reach for first: it has no transactions, so it cannot scope anything.
+
+  **Three boundaries moved.** *(1)* The **store ports** — `SnapshotStore`, `TriageStore`,
+  `AuditStore`, `FaqIndex`, `Embedder`, plus the new `OutcomeStore` and `BookingStore` — moved
+  into `contracts`. `db` cannot implement a port it would need `workflows` to see, and
+  `db → workflows → crm` points the graph backwards; same rule as `Effect` (Step 3) and
+  `HttpTransport` (Step 4). *(2)* `isAgentError` and `latestPerBooking` moved into `contracts`,
+  because three packages now ask "was this our fault." *(3)* `db` is no longer a leaf: `db → web`.
+
+  **Billing per booked job is not the incentive alignment — refusing to bill for a booking we got
+  wrong is.** Per-minute pricing pays us to keep a homeowner on the phone; per-booking pricing
+  fixes that and leaves a worse perversion standing, because if we bill for every job that reaches
+  the CRM then **our own error rate is an income stream**, and we are the company that publishes
+  its error rate. So `billable = !cancelled && !isAgentError(outcome)`, sharing `telemetry`'s
+  exact predicate. Which means an *unclassified* correction is unbilled: a triage backlog, an
+  Anthropic outage, or a cron nobody wired up now costs us **money**, not merely a worse published
+  number. `Invoice.staleTriage` reports how much, because the first symptom of a broken cron must
+  not be a quiet drop in revenue.
+
+  **What is deferred, and named:** no Clerk key (7.6 — the seam is built and isolation does not
+  depend on it), no Housecall Pro OAuth (7.5 — so `crmForTenant()` *refuses* a stored credential
+  rather than falling back to another tenant's token), no live Neon (7.7), no Stripe, and still
+  no real `Embedder` (6.6 needs a credential, not a database).
 
 - **Step 6 (core) — correction triage, the human audit, and the FAQ detour.** *(708 tests, 99.29%
   coverage, typecheck clean, `apps/web` builds.)* Step 2 made the wedge computable: *that* a booking

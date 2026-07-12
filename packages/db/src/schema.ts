@@ -12,6 +12,7 @@ import {
 } from "@ledgerline/contracts";
 import {
   boolean,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -22,6 +23,7 @@ import {
   smallint,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
   vector,
@@ -47,6 +49,24 @@ import {
  *   - `outcomes.human_label`      — the weekly 10% audit, published beside the
  *     correction rate. An unaudited classifier grading our own homework is
  *     marketing with extra steps.
+ *
+ * ## Tenancy (Step 7)
+ *
+ * **Every tenant-scoped table carries `tenant_id` directly, and Postgres enforces
+ * that the copy agrees with its parent.** Row-level security policies are the
+ * isolation mechanism (`rls.sql`), and a policy is a `USING` clause evaluated per
+ * row: it can afford `tenant_id = current_tenant()` and it cannot afford
+ * `EXISTS (SELECT ... JOIN ... JOIN ...)` three levels up to `outcomes`' owning
+ * tenant. So `tenant_id` is denormalized onto `call_turns`, `slots`, `escalations`,
+ * `bookings`, `job_snapshots`, and `outcomes`.
+ *
+ * Denormalized data can disagree with its source, and a row whose `tenant_id` says
+ * one thing while its parent call says another is a row RLS shows to the wrong
+ * contractor. So it is not allowed to disagree: each child declares a **composite
+ * foreign key** on `(parent_id, tenant_id)`, and each parent a matching unique
+ * constraint. An insert that files a call turn under the wrong tenant does not fail a
+ * review — it fails the database. That is `TriageStore.classify`'s move (a guarantee
+ * the type system carries) done in DDL.
  */
 
 /** `z.enum(...).options` is a readonly tuple; pgEnum wants a mutable one. */
@@ -158,7 +178,12 @@ export const calls = pgTable(
     recordingUrl: text("recording_url"),
     transcriptUrl: text("transcript_url"),
   },
-  (table) => [index("calls_tenant_started_idx").on(table.tenantId, table.startedAt)],
+  (table) => [
+    index("calls_tenant_started_idx").on(table.tenantId, table.startedAt),
+    // The target of every child's composite FK. `id` is already unique; Postgres
+    // still requires a unique constraint on the exact referenced column pair.
+    unique("calls_id_tenant_key").on(table.id, table.tenantId),
+  ],
 );
 
 /**
@@ -174,6 +199,10 @@ export const callTurns = pgTable(
     callId: uuid("call_id")
       .notNull()
       .references(() => calls.id),
+    /** Denormalized for RLS, and pinned to the call's own tenant by the FK below. */
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
     idx: integer("idx").notNull(),
     role: text("role").notNull(),
     state: callStateEnum("state").notNull(),
@@ -184,7 +213,14 @@ export const callTurns = pgTable(
     turnTakeOk: boolean("turn_take_ok").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [primaryKey({ columns: [table.callId, table.idx] })],
+  (table) => [
+    primaryKey({ columns: [table.callId, table.idx] }),
+    foreignKey({
+      columns: [table.callId, table.tenantId],
+      foreignColumns: [calls.id, calls.tenantId],
+      name: "call_turns_call_tenant_fk",
+    }),
+  ],
 );
 
 export const slots = pgTable(
@@ -193,6 +229,10 @@ export const slots = pgTable(
     callId: uuid("call_id")
       .notNull()
       .references(() => calls.id),
+    /** Denormalized for RLS, and pinned to the call's own tenant by the FK below. */
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
     key: slotKeyEnum("key").notNull(),
     value: jsonb("value").notNull(),
     /** The extractor's self-reported confidence, 0..1. A weak signal, recorded
@@ -208,52 +248,107 @@ export const slots = pgTable(
     /** Bumped each time the caller corrects this slot mid-call. */
     revision: integer("revision").notNull().default(0),
   },
-  (table) => [primaryKey({ columns: [table.callId, table.key] })],
+  (table) => [
+    primaryKey({ columns: [table.callId, table.key] }),
+    foreignKey({
+      columns: [table.callId, table.tenantId],
+      foreignColumns: [calls.id, calls.tenantId],
+      name: "slots_call_tenant_fk",
+    }),
+  ],
 );
 
-export const escalations = pgTable("escalations", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  callId: uuid("call_id")
-    .notNull()
-    .references(() => calls.id),
-  reason: escalationReasonEnum("reason").notNull(),
-  triggeredAt: timestamp("triggered_at", { withTimezone: true }).notNull(),
-  transferredTo: text("transferred_to"),
-  /** Null means a hazard transfer nobody picked up. Alert on it. */
-  humanAckAt: timestamp("human_ack_at", { withTimezone: true }),
-});
+export const escalations = pgTable(
+  "escalations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    callId: uuid("call_id")
+      .notNull()
+      .references(() => calls.id),
+    /** Denormalized for RLS, and pinned to the call's own tenant by the FK below. */
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    reason: escalationReasonEnum("reason").notNull(),
+    triggeredAt: timestamp("triggered_at", { withTimezone: true }).notNull(),
+    transferredTo: text("transferred_to"),
+    /** Null means a hazard transfer nobody picked up. Alert on it. */
+    humanAckAt: timestamp("human_ack_at", { withTimezone: true }),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.callId, table.tenantId],
+      foreignColumns: [calls.id, calls.tenantId],
+      name: "escalations_call_tenant_fk",
+    }),
+  ],
+);
 
 /* -------------------------------------------------------------------------- */
 /* Bookings                                                                    */
 /* -------------------------------------------------------------------------- */
 
 /** Nothing is written to the CRM during a call. This is what the call emits. */
-export const pendingBookings = pgTable("pending_bookings", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  callId: uuid("call_id")
-    .notNull()
-    .references(() => calls.id),
-  tenantId: uuid("tenant_id")
-    .notNull()
-    .references(() => tenants.id),
-  /** A `PendingBookingPayload`, parsed on the way in and on the way out. */
-  payload: jsonb("payload").notNull(),
-  status: bookingStatusEnum("status").notNull().default("PENDING"),
-  workflowRunId: text("workflow_run_id"),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const pendingBookings = pgTable(
+  "pending_bookings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    callId: uuid("call_id")
+      .notNull()
+      .references(() => calls.id),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    /** A `PendingBookingPayload`, parsed on the way in and on the way out. */
+    payload: jsonb("payload").notNull(),
+    status: bookingStatusEnum("status").notNull().default("PENDING"),
+    workflowRunId: text("workflow_run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.callId, table.tenantId],
+      foreignColumns: [calls.id, calls.tenantId],
+      name: "pending_bookings_call_tenant_fk",
+    }),
+    unique("pending_bookings_id_tenant_key").on(table.id, table.tenantId),
+  ],
+);
 
-export const bookings = pgTable("bookings", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  pendingBookingId: uuid("pending_booking_id")
-    .notNull()
-    .references(() => pendingBookings.id),
-  crmJobId: text("crm_job_id").notNull(),
-  crmCustomerId: text("crm_customer_id").notNull(),
-  committedAt: timestamp("committed_at", { withTimezone: true }).notNull(),
-  /** How many of `POLL_OFFSETS_MS` have run. Drives `nextDuePoll`. */
-  completedPolls: smallint("completed_polls").notNull().default(0),
-});
+export const bookings = pgTable(
+  "bookings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    pendingBookingId: uuid("pending_booking_id")
+      .notNull()
+      .references(() => pendingBookings.id),
+    /** Denormalized for RLS, pinned to the pending booking's tenant by the FK below. */
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    crmJobId: text("crm_job_id").notNull(),
+    crmCustomerId: text("crm_customer_id").notNull(),
+    committedAt: timestamp("committed_at", { withTimezone: true }).notNull(),
+    /**
+     * How many of `POLL_OFFSETS_MS` have run. Drives `nextDuePoll`.
+     *
+     * Incremented only by `PgBookingStore.recordPoll`, and only *after* the outcome
+     * is recorded. A poll that threw is a poll we still owe: consuming it here would
+     * turn a CRM outage into a booking we never re-read, and a correction we never
+     * counted reads as a *better* number than the truth.
+     */
+    completedPolls: smallint("completed_polls").notNull().default(0),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.pendingBookingId, table.tenantId],
+      foreignColumns: [pendingBookings.id, pendingBookings.tenantId],
+      name: "bookings_pending_tenant_fk",
+    }),
+    unique("bookings_id_tenant_key").on(table.id, table.tenantId),
+    index("bookings_due_idx").on(table.completedPolls, table.committedAt),
+  ],
+);
 
 /**
  * The CRM's copy of a job, over time.
@@ -271,11 +366,22 @@ export const jobSnapshots = pgTable(
     bookingId: uuid("booking_id")
       .notNull()
       .references(() => bookings.id),
+    /** Denormalized for RLS, and pinned to the booking's own tenant by the FK below. */
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
     polledAt: timestamp("polled_at", { withTimezone: true }).notNull(),
     /** The vendor's body, verbatim. Retained forever so anyone can recount. */
     payload: jsonb("payload").notNull(),
   },
-  (table) => [index("job_snapshots_booking_idx").on(table.bookingId, table.polledAt)],
+  (table) => [
+    index("job_snapshots_booking_idx").on(table.bookingId, table.polledAt),
+    foreignKey({
+      columns: [table.bookingId, table.tenantId],
+      foreignColumns: [bookings.id, bookings.tenantId],
+      name: "job_snapshots_booking_tenant_fk",
+    }),
+  ],
 );
 
 /**
@@ -295,6 +401,10 @@ export const outcomes = pgTable(
     bookingId: uuid("booking_id")
       .notNull()
       .references(() => bookings.id),
+    /** Denormalized for RLS, and pinned to the booking's own tenant by the FK below. */
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
     cancelled: boolean("cancelled").notNull().default(false),
     /** Slot key → the contractor's fixed value. Never destructively updated. */
     correctedFields: jsonb("corrected_fields").notNull().default({}),
@@ -316,7 +426,18 @@ export const outcomes = pgTable(
     auditedAt: timestamp("audited_at", { withTimezone: true }),
     observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
   },
-  (table) => [index("outcomes_booking_idx").on(table.bookingId, table.observedAt)],
+  (table) => [
+    index("outcomes_booking_idx").on(table.bookingId, table.observedAt),
+    foreignKey({
+      columns: [table.bookingId, table.tenantId],
+      foreignColumns: [bookings.id, bookings.tenantId],
+      name: "outcomes_booking_tenant_fk",
+    }),
+    // `(bookingId, observedAt)` is how `ClassificationRecord` and `HumanLabelRecord`
+    // name the observation they are labeling — a booking has up to three. Without
+    // this, a triage `UPDATE` could silently label two rows, or none.
+    unique("outcomes_booking_observed_key").on(table.bookingId, table.observedAt),
+  ],
 );
 
 /* -------------------------------------------------------------------------- */
@@ -360,3 +481,51 @@ export const faqEntries = pgTable(
     index("faq_entries_tenant_idx").on(table.tenantId),
   ],
 );
+
+/* -------------------------------------------------------------------------- */
+/* The tenancy manifest (Step 7)                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Every table holding one contractor's data, and therefore every table that must
+ * be `ENABLE`d, `FORCE`d, and policied in `rls.sql`.
+ *
+ * This list is the *specification*, and `rls.test.ts` checks the database against it
+ * — against a real Postgres, after the real migrations have run. Add a table with a
+ * `tenant_id` and forget its policy and the suite fails, which is the only version of
+ * this guarantee worth having: a comment saying "remember the RLS policy" is a comment
+ * that will one day be read by somebody in a hurry, and the cost of missing it is one
+ * contractor reading another's calls.
+ *
+ * `tenants` is not here. It is the root, its policy is `id = current_tenant()`, and it
+ * is checked separately — a tenant row scoped by a `tenant_id` column it does not have
+ * would be a different bug.
+ */
+export const TENANT_SCOPED_TABLES = [
+  "phone_numbers",
+  "service_areas",
+  "business_hours",
+  "job_types",
+  "calls",
+  "call_turns",
+  "slots",
+  "escalations",
+  "pending_bookings",
+  "bookings",
+  "job_snapshots",
+  "outcomes",
+  "faq_entries",
+] as const;
+
+/** The Postgres role the application connects as. **Never the table owner** — see `rls.sql`. */
+export const APP_ROLE = "ledgerline_app";
+
+/**
+ * The GUC the RLS policies read, set per transaction by `withTenant()`.
+ *
+ * `app.tenant_id` rather than a session variable set at connect time, because the
+ * connection is pooled: a `SET` that outlives its request hands the next request the
+ * previous tenant's id. `withTenant` uses `set_config(..., is_local => true)` inside a
+ * transaction, so it dies with the transaction whether it commits or rolls back.
+ */
+export const TENANT_GUC = "app.tenant_id";

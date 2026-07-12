@@ -3,11 +3,22 @@ import {
   type AddressInput,
   type BookingOutcome,
   type Clock,
+  type JobSnapshotRecord,
   type PendingBookingPayload,
   type SlotKey,
+  type SnapshotStore,
   type TimeWindow,
 } from "@ledgerline/contracts";
 import type { CrmAdapter, CrmJobRef, CrmJobSnapshot } from "@ledgerline/crm";
+
+/**
+ * `SnapshotStore` and `JobSnapshotRecord` moved into `contracts` in Step 7:
+ * `packages/db` implements them, and a port that crosses a package boundary
+ * belongs in the spine (the same argument that moved `Effect` in Step 3 and
+ * `HttpTransport` in Step 4). Re-exported here because this is where they are
+ * *used*, exactly as `machine.ts` re-exports `Effect`.
+ */
+export type { JobSnapshotRecord, SnapshotStore };
 
 /**
  * The wedge, made mechanical.
@@ -68,24 +79,7 @@ export function nextDuePoll(
 /* Snapshot storage                                                            */
 /* -------------------------------------------------------------------------- */
 
-/** One row of `job_snapshots` (plan, §7). The vendor payload, verbatim. */
-export interface JobSnapshotRecord {
-  readonly bookingId: string;
-  readonly polledAt: string;
-  readonly payload: unknown;
-}
-
-/**
- * Where raw snapshots go, forever.
- *
- * Retained unclassified so that Step 6's triage stays a *derived* column. A
- * model asked whether a contractor's edit was its own fault has an obvious bias,
- * and the only defence is that anyone can recount from the raw diff.
- */
-export interface SnapshotStore {
-  record(snapshot: JobSnapshotRecord): Promise<void>;
-}
-
+/** The test double. `PgSnapshotStore` in `packages/db` is the one that ships. */
 export class InMemorySnapshotStore implements SnapshotStore {
   readonly records: JobSnapshotRecord[] = [];
 
