@@ -10,6 +10,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
     "@ledgerline/billing": "*",
+    "@ledgerline/compliance": "*",
     "@ledgerline/contracts": "*",
     "@ledgerline/conversation": "*",
     "@ledgerline/crm": "*",

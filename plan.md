@@ -8,23 +8,24 @@
 
 ---
 
-## Current status (verified 2026-07-11, after Step 7's core)
+## Current status (verified 2026-07-11, after Step 8's core)
 
 The domain core is built and green, the call runtime that binds it to a voice
 session is tested end to end without a phone, the eval harness drives extraction
 through the *real* `SlotExtractor` port, the wedge has a *why* beside its *what*
 (correction triage, a human audit, and the rule that decides which number we are
-allowed to publish) — and as of Step 7 it has a **database that actually runs**:
-tenant isolation, the migrations, `pgvector`, and every store are exercised against
-a real Postgres in the PR suite. Everything below was re-run, not copied from a
-previous claim.
+allowed to publish), Step 7 gave it a **database that actually runs** — and as of
+Step 8 the compliance rules are **code rather than a policy page**: an unknown area
+code cannot be recorded without notice, an outbound marketing text does not compile,
+and a caller's card number never reaches the model, the database, or the CRM.
+Everything below was re-run, not copied from a previous claim.
 
 | Check | Result |
 |---|---|
-| `npm test` | **774 passed**, 25 files |
+| `npm test` | **919 passed**, 33 files |
 | `npm run typecheck` | clean |
-| `npm run test:coverage` | **99.31%** lines (thresholds: 90/90/85/90) |
-| `cd apps/web && npm run build` | builds, 6 routes |
+| `npm run test:coverage` | **99.36%** lines (thresholds: 90/90/85/90) |
+| `cd apps/web && npm run build` | builds, 7 routes |
 
 **Built.** `contracts`, `conversation` (SlotBook + the seven-state machine), `safety`
 (deterministic classifier, labeled corpus, `recall === 1.0`), `validators`, `extraction`
@@ -50,8 +51,17 @@ Step 7 adds `billing` (per booked job, and it refuses our own money when we got 
 wrong), gives `db` a client, RLS, and the Postgres stores, and gives `apps/web` the two crons
 that finally call the poller and the nightly triage pass.
 
-**Not built.** No telephony, no realtime model, no auth *provider*, no compliance work. **The
-`Effect[]` seam is bound and tested, but only against fakes** — `apps/agent` is an honest
+Step 8 adds `compliance` — the consent regime, the recording gate, PAN redaction, the
+retention windows, the branded `TransactionalSms`, and the AI disclosure itself, which moved
+here from `utterance` because it is legal text rather than an utterance. `runtime` gains a
+`Recorder` it starts only after the caller has *heard* the disclosure; `workflows` gains
+`runRetention()`; `db` gains migration `0003` and `PgRetentionStore`; `apps/web` gains the
+third cron. `docs/COMPLIANCE.md` and `docs/DPA.md` are the pages, and every rule on them
+names the code that enforces it.
+
+**Not built.** No telephony, no realtime model, no auth *provider*, and **no lawyer has read
+a word of the compliance work** (task 8.7 — the documents are written and the code enforces
+them; nobody has signed anything). **The `Effect[]` seam is bound and tested, but only against fakes** — `apps/agent` is an honest
 Python scaffold with no LiveKit room, no SIP trunk, and no GPT-Realtime (Step 4.2/4.6), and
 `CallRuntime` has never driven a real microphone. `GoogleGeocoder` has never spoken to a live
 Google endpoint, and the Pydantic half of the codegen has never run (no
@@ -92,8 +102,8 @@ person to open this file will trust it, and be wrong.
 | 5 | Eval over the real path | 🟡 **Core built** — 2026-07-10 (nightly/SIP arms deferred: 5.2/5.3/5.5) |
 | 6 | Correction triage + FAQ | 🟡 **Core built** — 2026-07-11 (live-model tail: 6.1's live run, 6.3's weekly ritual, 6.6's real embedder) |
 | 7 | Product — auth, tenancy, onboarding, billing | 🟡 **Core built** — 2026-07-11 (credential-gated tails: 7.5 onboarding/OAuth, 7.6 Clerk, 7.7 the live Neon) |
-| 8 | Compliance | ⬜ Not started ← **next** |
-| 9 | Publish the number | ⬜ Not started |
+| 8 | Compliance | 🟡 **Core built** — 2026-07-11 (8.6's live carrier deletion; **8.7, the lawyer's signature**) |
+| 9 | Publish the number | ⬜ Not started ← **next** |
 
 Not on the critical path, and unresolved: the `AgenticArm` A/B (§11), and
 `claude-haiku-4-5` vs `claude-sonnet-5` for extraction, scored on critical-slot accuracy.
@@ -118,9 +128,16 @@ Named so they cannot be quietly forgotten:
   measured — **task 6.6**. Step 7 built the `pgvector` half (`PgVectorFaqIndex`, tested against a
   real Postgres, and it cannot be made to leak one tenant's answers to another's caller). The
   embedder is what is left, and it needs a *credential*, not a database.
-- Whether the AI disclosure in `catalog.ts` satisfies counsel. It is committed, verbatim, and
-  pinned by an exact-equality test — but "reviewed" is a signature, not an assertion, and no
-  human has signed. **Step 8**, and it gates launch rather than code.
+- Whether the AI disclosure, `docs/COMPLIANCE.md`, and `docs/DPA.md` satisfy counsel. All
+  three are committed, versioned, and enforced by code that a lawyer can check against them
+  line by line — but "reviewed" is a signature, not an assertion, and no human has signed.
+  **Task 8.7**, and it is now the *only* thing in Step 8 that neither a credential nor a test
+  can supply. It gates revenue, not code.
+- Whether Twilio's recording-deletion endpoint answers the way `HttpRecordingArchive` maps it
+  — and, far more importantly, whether the deployment remembered to leave the **carrier's own
+  recording switch off**. That second one is the single compliance rule in this repo with no
+  test behind it, because no test can reach it. **Task 8.6**, with Step 4.2's telephony
+  account.
 
 ---
 
@@ -1192,13 +1209,142 @@ still owes.
 
 ---
 
-### Step 8 — Compliance (parallel with Step 7, gates launch, not code)
+### Step 8 — Compliance 🟡 **Core built (2026-07-11); the signature is deferred**
 
-AI disclosure at call start, spoken **verbatim** from the string committed in Step 3.
-Two-party-consent recording by state, keyed off the caller's area code with a conservative
-default. TCPA constraints if we ever do outbound (we should not, initially). PCI scope avoided
-entirely by never taking payment on the call. Recording retention and deletion policy. A
-per-tenant DPA.
+This Step was described above as gating *launch, not code*, and that sentence turned out to
+be the single most misleading line in this plan. Every bullet in it could have been a policy
+document — and a policy document is a thing you are later found to have breached. **The whole
+argument of this repo is that a rule worth having is a rule the system cannot break**: RLS
+rather than a `WHERE` clause, `Pick<CrmAdapter, "readJob">` rather than a code review, an
+unclassified correction counting against us rather than a promise not to cheat. Compliance is
+the step where that argument is either true or was always decoration.
+
+So `packages/compliance` is a package, not a page. `docs/COMPLIANCE.md` and `docs/DPA.md`
+exist, and every rule in them names the code that enforces it.
+
+| # | Task | Detail | |
+|---|---|---|---|
+| 8.1 | AI disclosure, verbatim, and **proof a caller heard it** | `AI_DISCLOSURE` moved from `utterance` to `compliance`, gained `DISCLOSURE_VERSION`, and `catalog.ts` re-exports it. `auditDisclosure()` scores real traces: an agent turn carrying the string **verbatim** *and* `turnTakeOk` — a greeting the TTS never spoke is not a disclosure. Its only passing rate is `1.0`. | ✅ |
+| 8.2 | Two-party consent by area code, conservative default | `compliance/consent.ts`. 14 all-party states (four contested, all listed strictly), ~300 area codes, and the property that matters: **an incomplete map is safe**. See surprise #1. | ✅ |
+| 8.3 | The notice, then the tape | The new `Recorder` port; `CallRuntime` is its only caller, and calls `begin()` only once the disclosure's `SpeechOutcome.spoke` comes back true. `RECORD_FROM_ANSWER` requires *both* ends to be known one-party states. Off without an enabled tenant and a current DPA. | ✅ |
+| 8.4 | TCPA: no outbound | `TransactionalSms` — a branded type, and `transactionalSms(booking, body)` is the only thing that can mint one. It reads `to` **out of the booking**. An outbound campaign is a compile error. See surprise #3. | ✅ |
+| 8.5 | PCI scope: never take payment | `redactPan()`, the **first statement** of `CallRuntime.hear`/`hearPartial`. The card never reaches the classifier, the extractor, Anthropic, Postgres, or the CRM. A labeled corpus, both directions, with one pinned false positive. See surprise #2. | ✅ |
+| 8.6 | Retention and deletion | 90 days (audio) / 365 (words). `runRetention()`, `PgRetentionStore`, migration `0003`, and `/api/cron/retention`. **The words go and the numbers stay** — surprise #4. `HttpRecordingArchive` has never spoken to a live carrier; it needs Step 4.2's telephony account. | 🟡 |
+| 8.7 | **A lawyer reads it** | `DPA_VERSION`, `tenants.dpa_version`, and a gate: no current DPA, no recording. The documents are written and the code enforces them. **Nobody has signed anything.** This is the one thing in Step 8 that a credential cannot buy and code cannot replace. | ⬜ |
+
+**Exit (met for the core, and the gap is named).** Seven mutations of the invariants were
+verified to fail the suite. What has never happened: a lawyer's signature, a live carrier
+deletion, and a caller.
+
+**Result:** 919 tests (was 774), 99.36% coverage, typecheck clean, `apps/web` builds (7
+routes, was 6).
+
+**Mutation-tested, all seven caught:** an unknown area code becoming one-party (2 tests); the
+tape starting before the disclosure (5); `requiresNoticeBeforeRecording` making *ignorance*
+permissive (4); the tombstone written before the media is deleted (2); a **silent** greeting
+still starting the tape (1); the PAN redaction moved to after the extractor (2); and dropping
+the Luhn/grouping guard, which eats a caller's phone number (1).
+
+#### Five things came out different from what this Step predicted
+
+1. **"Keyed off the caller's area code" is a sentence that cannot mean what it says, and the
+   conservative default is not a fallback — it is the design.** Number portability means a
+   `+1 415` number can be standing in a Boston kitchen, and nothing in the signalling tells
+   us. Every verdict is a *belief*, so the only real question is which way the beliefs are
+   allowed to be wrong.
+
+   They are allowed to be wrong toward caution and never away from it. An area code we do not
+   know is all-party — so an **incomplete map is safe**, and every NANP code assigned after we
+   shipped is safe on the day it is assigned, with no deploy. The asymmetry then propagates
+   backwards into the data: the all-party half of the map is deliberately *generous* (a wrong
+   entry costs us a recording), and the one-party half lists only codes we are sure of (a
+   wrong entry records somebody entitled to be asked first). Vermont has no wiretapping
+   statute at all, so it is `UNKNOWN` rather than one-party: **"no statute" is not
+   "permissive."**
+
+   And the *contractor* is a party too, whose state we actually know. A court applies the
+   stricter of the two laws, so `ONE_PARTY` requires **both** ends to be known one-party
+   states — a claim we can defend, rather than one we merely have no evidence against.
+
+2. **"PCI scope avoided entirely by never taking payment on the call" is a claim about us, and
+   PCI scope is not decided by us.** It is decided by whether cardholder data is present in
+   our systems, and a caller who says *"I'll just pay now, it's 4111 1111 1111 1111"* has put
+   it there without being asked. We never ask for a card; that is not remotely the same as
+   never receiving one, and the difference is a QSA's entire job.
+
+   So `redactPan()` is the first statement of `hear()` and `hearPartial()` — the only two
+   doors a caller's words enter this system through — and the card is gone before the
+   classifier, before the extractor, and therefore before Anthropic, before Postgres, and
+   before the contractor's CRM. **The trade-off runs the opposite way to the consent map's**,
+   which is what makes it interesting: over-redaction shreds a number the *plumber* needed, so
+   this classifier is precise rather than merely aggressive, has a labeled corpus in both
+   directions, and pins its one deliberate false positive exactly as `packages/safety` pins
+   its three.
+
+3. **"We should not do outbound, initially" is a sentence in a plan. The TCPA is a statute
+   with a per-message private right of action.** So `SmsSender.send()` now takes a
+   `TransactionalSms` — a branded type whose sole constructor takes a `PendingBookingPayload`
+   and reads the destination *out of it*. The only number this system can text is the
+   `callback_phone` a caller gave us on their own call and confirmed on a read-back. An
+   outbound campaign is not a policy we have decided against; it is an expression that does
+   not typecheck.
+
+   We also **did not** build a quiet-hours gate, deliberately. Every message we can send
+   confirms an appointment the recipient asked for seconds earlier on a call they placed. A
+   gate we would have to bypass on exactly the calls that matter most is theatre, and theatre
+   is worse than nothing: it teaches the next reader that the constraint was handled.
+
+4. **The retention policy and the reliability promise are the same design decision, and we
+   made it two steps ago without noticing.** Retention deletes the recording and blanks
+   `call_turns.text` — and every number in `computeMetrics()` survives, because principle #5
+   defined the metrics over turn *shape* (`first_word_latency_ms`, `barge_in`, `turn_take_ok`)
+   and never over turn *content*. **The reliability figures can be recomputed, from scratch,
+   over a database that has forgotten every caller who ever phoned.**
+
+   That reads like a lucky accident and is not. The obvious way to build any of those metrics
+   — a containment heuristic over the transcript, a barge-in detector looking for a cut-off
+   word — would have coupled the number we publish to the caller's own words, and a retention
+   policy would then have been a *choice* between deleting somebody's voice and being able to
+   prove our error rate. Nobody makes that choice on purpose. It gets discovered, late, by
+   somebody looking for a way out of it. A test in `telemetry` now pins it by computing the
+   metrics twice, once over turns whose text has been deleted.
+
+   The interlock runs the other way too, and Step 8 added no SQL to get it: the app role holds
+   **no `DELETE` on `outcomes` or `job_snapshots`** (migration `0002`), so the deletion policy
+   structurally cannot shred the corrections that made our published number look bad. A
+   retention job with a compliance badge is exactly the shape a dishonest one would take.
+
+5. **The demo data had quietly invented its own disclosure, and nothing could have caught it
+   until now.** `apps/web/lib/demo-data.ts` carried seven hand-written variations on "you're
+   speaking with an automated assistant" — none of them the committed string, none of them
+   mentioning that the call may be recorded. It looked completely fine on a dashboard and it
+   disclosed nothing. `auditDisclosure()` scores the string **verbatim** precisely because a
+   paraphrase is a disclosure nobody reviewed, and the first thing it found was ours.
+
+**Also settled, and worth not re-litigating:**
+
+- **`AI_DISCLOSURE` lives in `compliance` now, and `catalog.ts` re-exports it** — the
+  `machine.ts`/`Effect` move, for the reason that settled `isCorrected` (Step 6) and the store
+  ports (Step 7): a thing two packages must agree on belongs upstream of both. It is also not
+  really an utterance. It is legal text that happens to be spoken, and its neighbours are
+  `DPA_VERSION` and the consent regime — the things one person reviews in one sitting.
+- **The recording notice lives *inside* the disclosure**, and that is not economy. In an
+  all-party state, notice plus continued participation *is* the consent, so that sentence is
+  the mechanism by which we may record at all. Two separate sentences would eventually mean
+  one of them being cut in a tone pass, and it would be the one that mattered.
+- **A stale DPA is no DPA.** What changes between versions is the subprocessor list and the
+  retention schedule — precisely the two clauses a caller would care about. Bumping
+  `DPA_VERSION` therefore turns recording off for every tenant until each re-accepts, which is
+  deliberately expensive: a version bump that cost nothing would be a version bump nobody read.
+- **A failed deletion is counted, never tombstoned** — the poller's rule ("a failed poll does
+  not consume the poll it still owes"), and the same reasoning. A row saying
+  `recording_deleted_at` beside audio still in a carrier's bucket is a false statement about
+  somebody's voice, and a *self-healing* one: the call leaves the working set and no later run
+  ever looks at it.
+- **The one rule with no test behind it, stated in bold in three places:** the carrier's own
+  recording switch must be off. Twilio will record from the moment a call is answered if asked,
+  and no amount of correct logic on our side unmakes those seconds. It is a deployment fact,
+  not a code guarantee (`docs/COMPLIANCE.md` §2, `apps/agent/README.md`).
 
 ---
 
@@ -1657,21 +1803,32 @@ before you touch the database connection: **RLS policies do nothing when you con
 owner**, which is the role Neon hands you by default, and there is a passing test asserting the
 bypass so that nobody mistakes the policies for the guarantee.
 
-1. **Step 8 — compliance.** ← you are here. It gates revenue, not code, and its single hardest
-   item is a signature: no lawyer has read `AI_DISCLOSURE`. It is committed, verbatim, and pinned
-   by an exact-equality test, which is not the same as reviewed. Two-party-consent recording by
-   state, keyed off the caller's area code with a conservative default, is the other half.
-2. **The credentialed tails, whenever the accounts exist.** 4.2 (Twilio → SIP → LiveKit), 4.6
-   (GPT-Realtime), 4.10 (live Housecall Pro sandbox), 5.2 (LLM caller personas), 5.3 (real-SIP
-   barge-in/turn-take), 5.5 (the live prompt-cache measurement), 6.5 (the human audit's agreement
-   rate), 6.6 (a real embedder), 7.5 (Housecall Pro OAuth), 7.6 (Clerk), 7.7 (a live Neon). Each
-   is built to the port and waiting for a key.
+~~Step 8 — compliance.~~ Core built 2026-07-11. Read surprise #1 before you touch
+`packages/compliance`: "keyed off the caller's area code" cannot mean what it says — number
+portability makes an area code *evidence*, not a fact — so the conservative default is the
+design rather than a fallback, and the map is allowed to be wrong in exactly one direction.
+
+1. **Step 9 — publish the number.** ← you are here. And it is the first Step that cannot be
+   *built*: it needs real tenants, real calls, and real corrections. Everything it will report
+   is already computed — `correctionRate` raw, `agentErrorRate` beside it,
+   `publishedCorrectionRate()` deciding which one we are entitled to quote, and the human
+   audit's agreement rate licensing the classifier. What is missing is a contractor.
+2. **The two signatures and the credentialed tails.** **8.7 — a lawyer reads the disclosure,
+   `docs/COMPLIANCE.md`, and `docs/DPA.md`** — the only item in this plan that neither a
+   credential nor a test can supply, and it gates revenue. Then: 4.2 (Twilio → SIP → LiveKit),
+   4.6 (GPT-Realtime), 4.10 (live Housecall Pro sandbox), 5.2 (LLM caller personas), 5.3
+   (real-SIP barge-in/turn-take), 5.5 (the live prompt-cache measurement), 6.5 (the human
+   audit's agreement rate), 6.6 (a real embedder), 7.5 (Housecall Pro OAuth), 7.6 (Clerk), 7.7
+   (a live Neon), 8.6 (the live carrier deletion — and the deployment check that the carrier's
+   own recording switch is off). Each is built to the port and waiting for a key.
 
 The uncertain parts are retired: the model integration (Step 1), the wedge computation (Step 2),
 the committed catalog (Step 3), the whole conversational control loop (Step 4's core), the
 extraction seam under the eval (Step 5's core), the triage pipeline and its publication rule
-(Step 6's core), and — proven against a real Postgres rather than argued — tenant isolation
-(Step 7's core). What is left is plumbing to hardware and credentials, not risk.
+(Step 6's core), tenant isolation — proven against a real Postgres rather than argued (Step 7's
+core), and the compliance rules, which are now code that cannot be violated rather than a page
+somebody could be found to have breached (Step 8's core). What is left is plumbing to hardware
+and credentials, a lawyer, and a contractor — not risk.
 
 **Before you finish any step:** update the progress board at the top of this file and the
 step's own heading, in the same commit as the code. If you changed a boundary or a principle,

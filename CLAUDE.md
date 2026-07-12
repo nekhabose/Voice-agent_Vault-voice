@@ -95,6 +95,7 @@ packages/
   contracts/     Zod schemas. The spine. Slots, states, effects, bookings, traces, ports, HTTP, FAQ.
   conversation/  SlotBook + the state machine. Pure, no I/O.
   safety/        Deterministic emergency classifier. No LLM dependency.
+  compliance/    The rules a lawyer reads, as code. Consent, the disclosure, PAN redaction, retention, TCPA.
   validators/    Phone, address (geocoder port + GoogleGeocoder), service area, business hours.
   anthropic/     The vendor boundary: the outage taxonomy + the wire-level test transport. No prompts.
   extraction/    The Anthropic slot extractor. One tool, one field, one turn.        (call site #2)
@@ -119,18 +120,34 @@ apps/
 contracts ──► conversation ──► validators ──► eval
     │              │               ▲   │        ▲
     ├──► safety ───┼───────────────┘   │────────┘
+    ├──► compliance ──► {utterance, runtime, workflows, web}
     ├──► extraction ───────────────────┼─────────┘  (eval binds it as of Step 5.1; runtime binds it in tests)
     ├──► faq ─────────────────────────────┄┄─────►  (runtime binds it in tests)
     ├──► triage ──────────────────────────┄┄─────►  (workflows binds it in tests)
     ├──► utterance ────────────────────┤            (runtime binds it in tests)
     ├──► crm ──► workflows ┄┄► {telemetry, triage}  (┄ = test-only)
-    ├──► runtime ┄┄► {extraction, faq, utterance, telemetry}  (runtime deps: conversation, safety, validators)
+    ├──► runtime ┄┄► {extraction, faq, utterance, telemetry}  (runtime deps: conversation, safety, validators, compliance)
     ├──► billing ──► web
     ├──► telemetry ──► web
     └──► db ──► web        (db ┄┄► faq: test-only, to prove both FaqIndex impls rank alike)
 
 anthropic ──► {extraction, faq, triage}    (the SDK; depends on nothing of ours)
 ```
+
+**`compliance` depends on `contracts` alone, and four packages depend on it.** It is the
+`safety` of Step 8: a deterministic classifier in our own code, with no model and no I/O,
+sitting on the path of every call — except that `safety` classifies what the caller *said*
+and `compliance` classifies what we are *allowed to do about it*. `utterance` takes
+`AI_DISCLOSURE` from it (see below), `runtime` takes `redactPan` and `recordingDecision`,
+`workflows` takes `TransactionalSms` and the retention windows, and `web` takes the archive
+and the published policy.
+
+**`AI_DISCLOSURE` lives in `compliance`, and `utterance/catalog.ts` re-exports it** — exactly
+as `machine.ts` re-exports `Effect`. Two packages reason about it (one speaks it, one checks
+it was spoken verbatim), and it is not really an utterance: it is legal text that happens to
+be spoken, versioned beside `DPA_VERSION`, and the recording notice inside it is the thing
+that lets us record at all. Same rule that moved `isCorrected` (Step 6) and the store ports
+(Step 7): a thing two packages must agree on belongs upstream of both.
 
 **Three packages speak to a model, and each depends on `contracts` alone (plus the SDK).**
 `extraction` (call site #2), `faq` (#3), and `triage` (#5) each own their prompt, their tool, and
@@ -188,9 +205,16 @@ migration, and the Postgres stores — `PgSnapshotStore`, `PgOutcomeStore`, `PgB
 in one test to prove `PgVectorFaqIndex` and `InMemoryFaqIndex` rank identically; do not promote
 it.
 
+`Recorder` and `RecordingArchive` are in `contracts/src/ports.ts`, and `RetentionStore` in
+`stores.ts`, by the same rule as everything else there. `Recorder` is deliberately **separate
+from `VoiceSession`** even though one Python worker implements both: `VoiceSession` is what we
+say to the caller, `Recorder` is what we keep of what they say to us, and the two are governed
+by different law. A `say()` that also started a recording would hide a compliance decision
+inside an audio one.
+
 **The store ports live in `contracts`, not in the packages that consume them.** `SnapshotStore`,
-`OutcomeStore`, `BookingStore`, `TriageStore`, `AuditStore`, `FaqIndex`, and `Embedder` are all
-in `contracts/src/stores.ts`. They used to live in `workflows` and `faq`, which was right while
+`OutcomeStore`, `BookingStore`, `TriageStore`, `AuditStore`, `RetentionStore`, `FaqIndex`, and
+`Embedder` are all in `contracts/src/stores.ts`. They used to live in `workflows` and `faq`, which was right while
 the only implementations were in-memory doubles beside them — but `db` cannot implement a port it
 would have to depend on `workflows` to see, and `db → workflows → crm` points the graph
 backwards. Same rule as `Effect` (Step 3) and `HttpTransport` (Step 4): **a port that crosses a
@@ -455,6 +479,48 @@ verdict, an Anthropic outage, or a cron nobody wired up each cost us **money**, 
 worse published number. `Invoice.staleTriage` reports how much, because the first symptom of a
 broken cron must never be a quiet drop in revenue.
 
+### 8. The compliance rules are code, and every unknown lands on the strict side
+
+`packages/compliance`. `plan.md` called Step 8 a step that "gates launch, not code", and every
+bullet in it could have been a policy page. A policy page is a thing you are later found to
+have breached. Each rule is a mechanism instead:
+
+- **The notice, then the tape.** `CallRuntime` is the only caller of `Recorder.begin()`, and it
+  calls it only once the AI disclosure's `SpeechOutcome.spoke` comes back true. A greeting the
+  TTS never produced is not a disclosure — which is why a *silent* greeting is both a
+  `turnTakeOk` miss to `telemetry` and an unrecordable call to us, out of the same boolean.
+- **An area code is evidence, not a fact.** Number portability means a `+1 415` number can be
+  standing in Boston. So an unknown area code is all-party, a withheld number is all-party, and
+  `ONE_PARTY` requires *both* ends of the call to be known one-party states (a court applies the
+  stricter law, and the contractor is a party too). **An incomplete map is therefore safe** —
+  and the map's all-party half is deliberately generous while its one-party half lists only
+  codes we are sure of, because a wrong entry there records somebody entitled to be asked first.
+  "No statute" is not "permissive": Vermont is `UNKNOWN`.
+- **`redactPan()` is the first statement of `hear()` and `hearPartial()`.** We never *ask* for
+  a card; a caller can still read one out, and PCI scope is decided by what is in our systems
+  rather than by our intentions. Redacting there means the card never reaches the classifier,
+  the extractor, Anthropic, Postgres, or the CRM. The trade-off runs *opposite* to the consent
+  map's — over-redaction shreds a number the plumber needed — so it is precise, has a corpus in
+  both directions, and pins its one deliberate false positive.
+- **An outbound marketing text does not compile.** `SmsSender.send()` takes a
+  `TransactionalSms`, and `transactionalSms(booking, body)` is the only thing that mints one:
+  it reads `to` out of the booking. The only number we can text is the `callback_phone` a caller
+  gave us and confirmed on a read-back. Same move as `Pick<CrmAdapter, "readJob">`.
+- **The words go and the numbers stay.** Retention blanks `call_turns.text` and deletes the
+  audio; every metric survives, because principle #5 defined them over turn *shape* and never
+  turn *content*. The reliability figures can be recomputed over a database that has forgotten
+  every caller. And the deletion job **cannot reach `outcomes` or `job_snapshots`** — the app
+  role has no `DELETE` on either (principle #6), so a retention pass cannot shred the
+  corrections that made our published number look bad.
+- **A stale DPA is no DPA**, and no DPA means no recording. Bumping `DPA_VERSION` turns
+  recording off for every tenant until each re-accepts. That is deliberately expensive: a
+  version bump that cost nothing would be one nobody read.
+
+**The one rule with no test behind it, because no test can reach it: the carrier's own
+recording switch must be off.** Twilio records from the moment a call is answered if asked, and
+those seconds precede the disclosure. It is a deployment fact — `docs/COMPLIANCE.md` §2 and
+`apps/agent/README.md` both say so in bold.
+
 ---
 
 ## Conventions
@@ -488,21 +554,24 @@ broken cron must never be a quiet drop in revenue.
 
 ## Testing
 
-774 tests, 99.31% line coverage, thresholds enforced in `vitest.config.ts`.
+919 tests, 99.36% line coverage, thresholds enforced in `vitest.config.ts`.
 
 | Layer | Where | What it proves |
 |---|---|---|
 | Schema invariants | `contracts` | The graph is connected, terminal states have no successor, every slot has both a spec and an extraction schema, every `Effect` parses. And the worker JSON Schema is byte-current with the Zod — the codegen drift guard |
 | Unit | `conversation`, `safety`, `validators` | Slot mechanics, hazard precision/recall, phone/address/window rules, and `GoogleGeocoder`'s status→outcome mapping against transcribed wire shapes |
+| **The strict side** | `compliance` | An area code we have never heard of is all-party; a withheld number is all-party; `ONE_PARTY` needs *both* ends known; a state with no statute is not a permissive one. A labeled PAN corpus in both directions, with one pinned deliberate false positive. A `404` from the archive is `already_absent` and a `500` throws. And the disclosure, pinned byte-for-byte, scored **verbatim** over real traces — a paraphrase fails the audit |
 | Review surface | `utterance` | The catalog is data, not template functions; every slot has an ask and a read-back; the AI disclosure is byte-for-byte what it was; `LlmUtterer` refuses to reword anything but `ASK_FOR` — including the FAQ answer |
 | Replay | `extraction`, `faq`, `triage` | Committed model responses driven through the **real** tool schemas and the real contracts. **Zero live model calls** anywhere — the SDK's `fetch` is injected (`@ledgerline/anthropic`). A suite whose green depends on a third party's uptime teaches the team to ignore red. Each asserts its cached prefix is byte-identical across two different inputs, and that a `400` throws while a `429` degrades |
 | Selection, not generation | `faq` | The caller hears the contractor's committed answer verbatim; an `entry_id` the model invented comes back `unknown`; nothing above the floor means **no model call at all**; one tenant's answers never reach another's caller |
 | The interested party | `triage` + `workflows` | The classifier declines without a rationale, declines a label outside the enum, and cannot write to `correctedFields` (a type error). An outage and a decline both leave the correction counting against us, and neither aborts the batch |
 | Contract | `crm` | **One suite, both adapters.** If it passes for Housecall Pro and Jobber, the interface is not a rename of one vendor's endpoints. `readJob` is asserted in our vocabulary against each vendor's |
 | Runtime | `runtime` | A whole call driven through the **real** machine, classifier, validators, and `Effect[]` binding against `FakeVoiceSession` — greeting/disclosure first, out-of-order-safe read-backs, correction revokes confirmation, extraction outage retries then escalates as `AGENT_ERROR`, hazard on an ASR partial short-circuits before the extractor, a caller's question detours through the FAQ (filler first, then the answer, then the same slot re-asked) without counting as an extraction failure, and every turn traced so `checkBudgets()` scores it (silence breaches `turnTakeRate`) |
+| **The notice, then the tape** | `runtime` | `FakeRecorder` snapshots the transcript at `begin()`, so the assertion is not *did we record* but **what had the caller heard when we started recording them** — the compliance question, put the way a regulator puts it. `[disclosure]` on the ordinary path, `[]` only when both ends are known one-party, `null` for a silent greeting, an unconfigured tenant, or a missing DPA. And the caller's card never reaches `FakeExtractor` — the thing a live model would have seen |
 | Drift | `db` | Every `pgEnum` equals its Zod source, and the `pgvector` column is the width `contracts` declares |
 | **Tenancy** | `db` | **A real Postgres**, in-process (PGlite), with the **real committed migrations** applied and connected as the **real app role**. One tenant cannot read another's rows, write into another's tenant, or reach another's FAQ answers through the retrieval index; an unscoped connection sees *nothing*; a session-level GUC leaks and is caught; a call turn filed under the wrong tenant fails the FK; the app role cannot `UPDATE corrected_fields` or `DELETE` an outcome. And a passing test asserts **the owner bypasses RLS entirely** — the fact a deployment gets wrong silently |
 | Store contract | `db` | The Postgres stores against the same expectations as the in-memory doubles, `PgVectorFaqIndex` ranking identically to `InMemoryFaqIndex`, and the SQL `WHERE` for "corrected" agreeing with `contracts`' `isCorrected()` over the same rows |
+| **Retention** | `db`, `workflows`, `telemetry` | Against a real Postgres: the text is blanked and `first_word_latency_ms` / `barge_in` / `turn_take_ok` **survive**, so `computeMetrics()` produces byte-identical numbers over turns whose words are gone (pinned in `telemetry`). The app role **cannot `DELETE` a call** — retention has no choice but to redact — and **cannot `DELETE` an outcome**, so the deletion policy cannot shred the evidence behind the published number. A failed deletion is counted and *not* tombstoned; the deletion stays owed |
 | Integration | `workflows` | The booking saga, including the forced `create_job` failure and its compensating rollback. The outcome poller — a hand-edited job body through the real adapter, the real diff, and the real `computeMetrics()`. The nightly triage batch. And the cron: a CRM outage records nothing, consumes no poll, does not abort the batch, and the poll it owed is picked up by the next run |
 | The published number | `telemetry` | `agentErrorRate ≤ correctionRate`, always; an untriaged correction counts as our fault; the human overrules the model; and `publishedCorrectionRate()` refuses the classifier below 20 audited labels or 95% agreement |
 | The invoice | `billing` | We do not bill for a cancelled booking, an agent error, or **a correction nobody has classified**. The human auditor can move money in either direction. And an identity: every booking `telemetry` counts as an agent error is a booking `billing` waived — they import the same predicate, and this asserts they cannot drift |
@@ -514,7 +583,7 @@ broken cron must never be a quiet drop in revenue.
   `readBacks` precisely because asserting the final *value* would also pass a
   system that silently kept a stale confirmation.
 - **Mutation-test the invariants that matter.** Break the thing, confirm the
-  suite screams, revert. Twenty-four are verified: revoking confirmation on
+  suite screams, revert. Thirty-one are verified: revoking confirmation on
   correction (caught in 3 places); in-phrase fuzzy matching (drops recall to
   0.974); in `extraction`, dropping `thinking: {type:"disabled"}`, skipping the
   Zod re-validation of the model's output, interpolating a per-call value into
@@ -536,10 +605,18 @@ broken cron must never be a quiet drop in revenue.
   added in Step 7: making `withTenant`'s `set_config` **session-level instead of
   transaction-local** (the tenant leaks to the next request on a pooled connection —
   exactly one test catches it), **billing an unclassified correction**, and letting a
-  **failed poll consume the poll it still owes** (fails 2).
+  **failed poll consume the poll it still owes** (fails 2); and, added in Step 8: an
+  **unknown area code becoming one-party** (fails 2), the **tape starting before the
+  disclosure** (5), `requiresNoticeBeforeRecording` making *ignorance* permissive (4),
+  the **tombstone written before the media is deleted** (2), a **silent greeting still
+  starting the tape** (1), moving `redactPan` to **after** the extractor so the caller's
+  card reaches the model (2), and dropping the Luhn/grouping guard, which eats a caller's
+  **phone number** (1).
   **`TriageStore.classify` writing `correctedFields` is not on this list because it
   is a type error, not a test failure** — which is the stronger guarantee. As of Step 7
-  it is *also* a Postgres permission error, which holds for a raw `db.execute()`.
+  it is *also* a Postgres permission error, which holds for a raw `db.execute()`. **An
+  outbound marketing SMS is on the same footing as of Step 8**: `SmsSender.send()` takes a
+  branded `TransactionalSms`, so a text to a number no caller gave us does not compile.
 - The emergency classifier reports precision **and** recall over a labeled
   bilingual corpus every run (38 hazards, 28 routine calls). `recall === 1.0` is
   asserted. Precision is currently 1.0, with 3 documented deliberate false
@@ -623,8 +700,23 @@ Stated plainly, because a README that implies otherwise is marketing.
   it is a generated artifact.
 - **Nothing has ever spoken an utterance out loud.** `packages/utterance` renders
   strings; no TTS engine has read one, so the prosody of "305 555 1234" is a
-  guess. And **no lawyer has read `AI_DISCLOSURE`** — it is committed and pinned,
-  which is not the same as reviewed. That signature is Step 8's.
+  guess.
+- **No lawyer has read a word of the compliance work.** `packages/compliance`,
+  `docs/COMPLIANCE.md`, and `docs/DPA.md` are engineering's best reading of the law,
+  written so counsel can check the code against them line by line — and that is *not the
+  same thing as advice*. `AI_DISCLOSURE` is committed, versioned, and pinned by an
+  exact-equality test in two packages, which is not the same as reviewed. **Task 8.7 is a
+  signature, and it is the only item in `plan.md` that neither a credential nor a test can
+  supply.** It gates revenue, not code.
+- **`HttpRecordingArchive` has never spoken to a live carrier**, and there is none to
+  speak to (Step 4.2). Real code behind the `HttpTransport` port, proven offline against
+  transcribed wire shapes — the same status as `GoogleGeocoder` and both CRM adapters
+  (task 8.6). **And the one compliance rule with no test behind it lives here:** the
+  carrier's own recording switch must be off, or the tape starts before the disclosure and
+  nothing in this repo can stop it. No code can reach that; it is written in bold in
+  `docs/COMPLIANCE.md` §2 and `apps/agent/README.md` instead.
+- **No consumer deletion-request path.** Retention is scheduled and automatic; erasure on
+  request (CCPA) is not built. It needs a customer before it needs a design.
 - **`LlmUtterer` has no bound `Phraser`.** Nothing in the tree implements one;
   it is a drafting tool waiting for a credential, and `CachedUtterer` is what
   every code path actually uses.
@@ -769,10 +861,97 @@ Stated plainly, because a README that implies otherwise is marketing.
   `telemetry` computes the number we publish from the same predicate, and a drift between them
   invoices a contractor for a booking we called our own error. `invoice.test.ts` asserts the
   identity.
+- **`redactPan()` must stay the *first statement* of `CallRuntime.hear()` and `hearPartial()`.**
+  Move it below the extractor call "so the model gets the real text" and the caller's card
+  number reaches Anthropic, `call_turns.text`, and the CRM's `description` field. Two runtime
+  tests fail. The `text` those methods bind is the only version of the caller's words the rest
+  of the process ever sees, and that is the design.
+- **`redactPan` requires 13 digits, and Luhn on anything separated.** Both bounds are load-bearing
+  in the *precision* direction: the `callback_phone` slot is a ten-digit number a caller reads
+  out, and `"3055551234 33135"` — a phone and a ZIP in one breath — is fifteen digits with a
+  space in it. Widen the matcher and the booking loses the number to call the customer back on.
+- **Adding a state to `ALL_PARTY_CONSENT_STATES` is free; adding an area code to the one-party
+  half of `AREA_CODE_STATE` is not.** An unknown code is all-party, so omission is safe and
+  over-inclusion on the strict side is safe. A *wrong* one-party entry records somebody the law
+  entitled to be asked first. Do not "complete" the map from memory.
+- **A retention pass writes the tombstone only after the archive returns.** Reverse the two
+  lines in `runRetention()` and a carrier outage writes `recording_deleted_at` over audio still
+  in somebody's bucket — and the call leaves the working set, so no later run ever looks at it.
+  Two tests fail. Same rule as "a failed poll does not consume the poll it still owes".
+- `apps/web/lib/demo-data.ts` builds its greeting from `AI_DISCLOSURE` rather than typing one
+  out. It used to carry seven hand-written paraphrases — which looked fine on a dashboard and
+  disclosed nothing. `auditDisclosure()` scores the string **verbatim** for exactly that reason.
+- The `Recorder` port is **not** part of `VoiceSession`, and must not be folded into it. One
+  worker implements both, but a `say()` that also started a recording would hide a compliance
+  decision inside an audio one.
 
 ---
 
 ## Change log
+
+- **Step 8 (core) — compliance, as code rather than as a page.** *(919 tests, 99.36% coverage,
+  typecheck clean, `apps/web` builds — 7 routes.)* `plan.md` called this the step that "gates
+  launch, not code", and every bullet in it could have been a policy document. A policy document
+  is a thing you are later found to have breached. The whole argument of this repo is that a rule
+  worth having is a rule the system cannot break — RLS over a `WHERE` clause,
+  `Pick<CrmAdapter, "readJob">` over a code review, an unclassified correction counting against us
+  — and compliance is the step where that argument is either true or was always decoration. So
+  `packages/compliance` is a package: the consent regime, the recording gate, PAN redaction, the
+  retention windows, the branded `TransactionalSms`, and the AI disclosure itself.
+
+  **"Keyed off the caller's area code" is a sentence that cannot mean what it says.** Number
+  portability makes a `+1 415` number a thing that can be standing in a Boston kitchen, and nothing
+  in the signalling tells us. Every verdict is a *belief*, so the only real question is which way
+  the beliefs may be wrong — and the answer is: toward caution, never away from it. An unknown area
+  code is all-party, so **an incomplete map is safe**, and every NANP code assigned after we shipped
+  is safe on the day it is assigned, with no deploy. That asymmetry propagates into the data itself:
+  the all-party half of the map is deliberately generous (a wrong entry costs us a recording) and
+  the one-party half lists only codes we are sure of (a wrong entry records somebody entitled to be
+  asked first). Vermont has no wiretapping statute, so it is `UNKNOWN` — **"no statute" is not
+  "permissive"**. And the contractor is a party too, whose state we *do* know: a court applies the
+  stricter law, so `ONE_PARTY` requires both ends.
+
+  **"PCI scope avoided entirely by never taking payment" is a claim about us, and PCI scope is not
+  decided by us.** It is decided by whether cardholder data is in our systems, and a caller who
+  says "I'll just pay now, it's 4111 1111 1111 1111" has put it there without being asked. So
+  `redactPan()` is the first statement of `hear()`/`hearPartial()` — the only two doors a caller's
+  words enter through — and the card is gone before the classifier, the extractor, Anthropic,
+  Postgres, and the CRM. Its trade-off runs *opposite* to the consent map's (over-redaction shreds
+  a number the plumber needed), so it is precise rather than aggressive, has a labeled corpus in
+  both directions, and pins its one deliberate false positive exactly as `safety` pins its three.
+
+  **The retention policy and the reliability promise turned out to be the same decision, made two
+  Steps ago without noticing.** Retention deletes the audio and blanks `call_turns.text` — and
+  every number in `computeMetrics()` survives, because principle #5 defined the metrics over turn
+  *shape* and never turn *content*. The published figures can be recomputed over a database that
+  has forgotten every caller who ever phoned. That reads like luck and is not: a
+  containment-from-transcript metric, which is the obvious way to build one, would have made
+  retention a *choice* between deleting somebody's voice and being able to prove our error rate —
+  and nobody makes that choice on purpose. It gets discovered, late, by somebody looking for a way
+  out of it. The interlock runs the other way too, and Step 8 added no SQL to get it: the app role
+  holds **no `DELETE` on `outcomes`**, so the deletion policy structurally cannot shred the
+  corrections that made our published number look bad.
+
+  **Three boundaries moved.** *(1)* `AI_DISCLOSURE` left `utterance` for `compliance`, versioned
+  beside `DPA_VERSION`; `catalog.ts` re-exports it, as `machine.ts` re-exports `Effect`. It is not
+  an utterance — it is legal text that happens to be spoken, and the recording notice *inside* it
+  is what permits us to record at all. *(2)* `Recorder`, `RecordingArchive`, and `RetentionStore`
+  are new ports in `contracts`; `Recorder` is deliberately **not** part of `VoiceSession`, because
+  a `say()` that also started a recording would hide a compliance decision inside an audio one.
+  *(3)* `SmsSender` takes a branded `TransactionalSms`, so an outbound marketing text is a compile
+  error rather than a policy violation.
+
+  **And the demo data had quietly invented its own disclosure** — seven hand-written variations on
+  "you're speaking with an automated assistant", none of them the committed string, none of them
+  mentioning recording. It looked fine on a dashboard and it disclosed nothing. `auditDisclosure()`
+  scores the string **verbatim** because a paraphrase is a disclosure nobody reviewed, and the
+  first thing it found was ours.
+
+  **What is deferred, and named:** **8.7 — a lawyer's signature**, the only item left in `plan.md`
+  that neither a credential nor a test can supply; 8.6's live carrier deletion; no CCPA
+  erasure-on-request path (it needs a customer before it needs a design); and the one compliance
+  rule with no test behind it, because no test can reach it — **the carrier's own recording switch
+  must be off**, or the tape starts before the disclosure and nothing in this repo can stop it.
 
 - **Step 7 (core) — tenancy, the crons, and billing that refuses our own money.** *(774 tests,
   99.31% coverage, typecheck clean, `apps/web` builds — 6 routes.)* Every step before this one

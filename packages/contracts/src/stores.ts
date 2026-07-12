@@ -204,3 +204,51 @@ export interface FaqIndex {
     limit: number,
   ): Promise<readonly RetrievedFaqEntry[]>;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Retention — what we promised to forget (Step 8)                             */
+/* -------------------------------------------------------------------------- */
+
+/** A call whose recording is past its window. */
+export interface ExpiredRecording {
+  readonly callId: string;
+  /** Where the media is. Non-null by construction: a call with no recording has nothing to delete. */
+  readonly recordingUrl: string;
+}
+
+/**
+ * What `runRetention()` may do to a call, and — read the *absent* methods — what it may
+ * not.
+ *
+ * There is no `delete(callId)` here, and there could not be: `ledgerline_app` holds no
+ * `DELETE` on `calls` or `call_turns` (migration `0002`), because a call is evidence.
+ * So retention **redacts rather than deletes**, and the shape of what survives is the
+ * whole design:
+ *
+ * - `redactTranscript` blanks `call_turns.text` and leaves `first_word_latency_ms`,
+ *   `barge_in`, and `turn_take_ok` standing. Every number in `computeMetrics()` is
+ *   computed from turn *shape*, never turn content, so **the published reliability
+ *   figures outlive every word the caller spoke.** A retention policy and a
+ *   measurement promise that could not both be kept would be a choice we would end up
+ *   making quietly.
+ * - Nothing here can reach `outcomes` or `job_snapshots` at all — the raw diff behind
+ *   the number we publish. Not by convention: the app role has no `DELETE` on either,
+ *   so a retention job that grew an appetite for them would be refused by Postgres.
+ */
+export interface RetentionStore {
+  /** Recordings made before `before`, oldest first, that have not been tombstoned. */
+  expiredRecordings(before: Date, limit: number): Promise<readonly ExpiredRecording[]>;
+  /**
+   * The media is gone from the vendor. Write it down.
+   *
+   * Called **only after** `RecordingArchive.delete` has returned. Tombstoning first and
+   * deleting second means a failed delete leaves a row claiming a recording was
+   * destroyed while the audio sits in somebody's bucket — the one lie this subsystem
+   * exists to make impossible.
+   */
+  markRecordingDeleted(callId: string, at: Date): Promise<void>;
+  /** Calls started before `before` whose turn text has not been blanked yet. */
+  expiredTranscripts(before: Date, limit: number): Promise<readonly string[]>;
+  /** Blank every turn's text. The latency columns survive; the words do not. */
+  redactTranscript(callId: string, at: Date): Promise<void>;
+}

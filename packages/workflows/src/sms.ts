@@ -1,20 +1,29 @@
+import type { TransactionalSms } from "@ledgerline/compliance";
 import type { TimeWindow } from "@ledgerline/contracts";
 
-export interface SmsMessage {
-  readonly to: string;
-  readonly body: string;
-}
-
+/**
+ * **The port takes a `TransactionalSms`, not an arbitrary `{to, body}`** (Step 8).
+ *
+ * That one type substitution is the TCPA constraint. `packages/compliance` brands the
+ * message, and the only thing in the tree that can mint one reads the destination out
+ * of a `PendingBookingPayload` — so the sole number this system is able to text is the
+ * `callback_phone` a caller gave us on their own call and confirmed on a read-back.
+ *
+ * An outbound marketing send is therefore not a policy we have decided against. It is
+ * an expression that does not typecheck, which is the same guarantee
+ * `Pick<CrmAdapter, "readJob">` gives the poller and `TriageStore.classify` gives the
+ * raw diff.
+ */
 export interface SmsSender {
-  send(message: SmsMessage): Promise<void>;
+  send(message: TransactionalSms): Promise<void>;
 }
 
 export class FakeSms implements SmsSender {
-  readonly sent: SmsMessage[] = [];
+  readonly sent: TransactionalSms[] = [];
 
   constructor(private readonly failWith?: Error) {}
 
-  async send(message: SmsMessage): Promise<void> {
+  async send(message: TransactionalSms): Promise<void> {
     if (this.failWith) throw this.failWith;
     this.sent.push(message);
   }

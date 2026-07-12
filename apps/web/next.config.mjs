@@ -4,6 +4,7 @@ const nextConfig = {
   // build step, and the dashboard always reflects the real domain types.
   transpilePackages: [
     "@ledgerline/billing",
+    "@ledgerline/compliance",
     "@ledgerline/contracts",
     "@ledgerline/conversation",
     "@ledgerline/crm",

@@ -56,6 +56,17 @@ discipline the rest of this repo holds itself to.
   TypeScript `FakeVoiceSession` does.
 - **Nothing here has run against a live call.** The tested seam is
   `packages/runtime`; this is its audio adapter, waiting for hardware.
+- **No `Recorder`.** Step 8 added a second port beside `VoiceSession`, and the
+  worker will have to implement it: `begin()` / `stop()`, and **nothing else may
+  start a recording**. Which brings the one rule this repo cannot enforce for you:
+
+  > **The carrier's own recording switch must be off.** Twilio will record from the
+  > moment a call is answered if you ask it to (`record=true` on the TwiML `<Dial>`
+  > or the SIP domain), and those seconds happen before the AI disclosure has been
+  > spoken. `packages/compliance` decides *whether* we may record and `CallRuntime`
+  > decides *when* — and both are worth nothing if the vendor started the tape first.
+  > See `docs/COMPLIANCE.md` §2. This is a deployment fact, not a code guarantee, and
+  > it is the only compliance rule in Step 8 with no test behind it.
 - **The `contracts.py` is not committed** until the generator has run in an
   environment with `datamodel-code-generator` installed; the JSON Schema it is
   generated from *is* committed and drift-guarded.

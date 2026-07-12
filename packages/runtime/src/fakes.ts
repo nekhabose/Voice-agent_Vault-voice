@@ -2,6 +2,7 @@ import type {
   BookingSink,
   EscalationReason,
   PendingBookingPayload,
+  Recorder,
   SpeechOutcome,
   VoiceSession,
 } from "@ledgerline/contracts";
@@ -76,6 +77,38 @@ export const SILENT_SPEECH_OUTCOME: SpeechOutcome = {
   firstWordLatencyMs: null,
   turnLatencyMs: null,
 };
+
+/**
+ * A recorder that records *when* it was told to start, rather than any audio.
+ *
+ * The assertion this exists to make is not "did we record" — a boolean cannot fail the
+ * way this can go wrong. It is **"what had the caller heard by the time we started
+ * recording them?"**, which is the compliance question stated exactly as a regulator
+ * would put it. So `begin()` snapshots the transcript as it stood at that instant:
+ *
+ * - `[]` — the tape was rolling before we said a word. Lawful only where both ends of
+ *   the call are known one-party states.
+ * - `[greeting]` — the caller heard the AI disclosure, and *then* we began. The normal
+ *   case, and the only one available when we cannot place the caller.
+ * - `null` — `begin()` was never called. No recording exists.
+ *
+ * A `boolean started` would pass every one of those.
+ */
+export class FakeRecorder implements Recorder {
+  /** The transcript as it stood when recording began. `null` = never began. */
+  heardBeforeRecording: readonly string[] | null = null;
+  stopped = false;
+
+  constructor(private readonly transcript: () => readonly string[]) {}
+
+  async begin(): Promise<void> {
+    this.heardBeforeRecording = [...this.transcript()];
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+  }
+}
 
 /**
  * Where a finished call posts its `PendingBooking`. Records the payloads;

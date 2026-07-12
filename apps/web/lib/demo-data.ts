@@ -7,6 +7,7 @@ import type {
   HazardDetection,
   SlotKey,
 } from "@ledgerline/contracts";
+import { AI_DISCLOSURE, auditDisclosure } from "@ledgerline/compliance";
 import { computeMetrics, publishedCorrectionRate } from "@ledgerline/telemetry";
 
 /**
@@ -46,6 +47,20 @@ export interface DemoCall {
   readonly hazard?: HazardDetection;
   readonly escalationReason?: EscalationReason;
 }
+
+/**
+ * What the agent actually says, first, on every call.
+ *
+ * **This used to be a paraphrase**, and it was wrong in the exact way Step 8's
+ * `auditDisclosure()` exists to catch: seven hand-written variations on "you're speaking
+ * with an automated assistant", none of them the committed string, none of them mentioning
+ * that the call may be recorded. It looked fine on a dashboard and it disclosed nothing.
+ *
+ * `AI_DISCLOSURE` is now interpolated from `@ledgerline/compliance`, so the demo cannot
+ * drift from the legal text — the same rule that keeps every other number on this page
+ * computed rather than typed.
+ */
+const GREETING = `Thanks for calling ${TENANT.name}. ${AI_DISCLOSURE} What can I help you with today?`;
 
 const TENANT_ID = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
 
@@ -111,7 +126,7 @@ const live: DemoCall = {
   summary: "Water heater leaking into the garage",
   state: "SCHEDULE",
   turns: [
-    turn("live-1", 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant. How can I help?", { firstWord: 380, total: 1600 }),
+    turn("live-1", 0, "agent", "GREETING", GREETING, { firstWord: 380, total: 1600 }),
     turn("live-1", 1, "caller", "IDENTIFY", "Hi, this is Rosa Delgado. My water heater is leaking."),
     turn("live-1", 2, "agent", "TRIAGE", "Understood, a leaking water heater. Is much water coming out?", { firstWord: 410, total: 1500 }),
     turn("live-1", 3, "caller", "TRIAGE", "Just a little, but it's soaking the garage."),
@@ -133,7 +148,7 @@ const bookedSpelledName: DemoCall = {
   summary: "No hot water since last night",
   state: "CLOSE",
   turns: [
-    turn("call-2", 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant. How can I help?", { firstWord: 340, total: 1500 }),
+    turn("call-2", 0, "agent", "GREETING", GREETING, { firstWord: 340, total: 1500 }),
     turn("call-2", 1, "caller", "IDENTIFY", "There's been no hot water since last night."),
     turn("call-2", 2, "agent", "IDENTIFY", "Happy to help. Can I get your name?", { firstWord: 390, total: 1400 }),
     turn("call-2", 3, "caller", "IDENTIFY", "Marisol Peña. P-E-Ñ-A."),
@@ -158,7 +173,7 @@ const bookedEnglish: DemoCall = {
   summary: "Kitchen sink drain backing up",
   state: "CLOSE",
   turns: [
-    turn("call-3", 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant. How can I help?", { firstWord: 360, total: 1500 }),
+    turn("call-3", 0, "agent", "GREETING", GREETING, { firstWord: 360, total: 1500 }),
     turn("call-3", 1, "caller", "TRIAGE", "My kitchen sink is backing up, it's pretty slow."),
     turn("call-3", 2, "agent", "IDENTIFY", "Got it. Can I get your name?", { firstWord: 300, total: 1200 }),
     turn("call-3", 3, "caller", "IDENTIFY", "Daniel Okafor."),
@@ -201,7 +216,7 @@ const emergency: DemoCall = {
     ruleId: "gas.smell.cooccurrence",
   },
   turns: [
-    turn("call-4", 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant.", { firstWord: 350, total: 1500 }),
+    turn("call-4", 0, "agent", "GREETING", GREETING, { firstWord: 350, total: 1500 }),
     turn("call-4", 1, "caller", "IDENTIFY", "Huele a gas en la cocina, no sé qué hacer."),
     turn("call-4", 2, "agent", "EMERGENCY", "Leave the house now and call 911. I'm connecting you to a person.", { firstWord: 290, total: 1300 }),
   ],
@@ -217,7 +232,7 @@ const outOfArea: DemoCall = {
   state: "HANDOFF",
   escalationReason: "OUT_OF_SERVICE_AREA",
   turns: [
-    turn("call-5", 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant.", { firstWord: 330, total: 1400 }),
+    turn("call-5", 0, "agent", "GREETING", GREETING, { firstWord: 330, total: 1400 }),
     turn("call-5", 1, "caller", "QUALIFY", "I'm at 1500 Las Olas Boulevard in Fort Lauderdale."),
     turn("call-5", 2, "agent", "HANDOFF", "That's outside our service area — I'm sorry. Let me give you a number that covers Broward.", { firstWord: 700, total: 1900 }),
   ],
@@ -234,7 +249,7 @@ const hungUp: DemoCall = {
   summary: "Hung up during a slow greeting",
   state: "CLOSE",
   turns: [
-    turn("call-6", 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant.", { firstWord: 1_450, total: 3_200 }),
+    turn("call-6", 0, "agent", "GREETING", GREETING, { firstWord: 1_450, total: 3_200 }),
   ],
   slots: [],
 };
@@ -267,7 +282,7 @@ function routine(spec: RoutineSpec): DemoCall {
     summary: spec.summary,
     state: "CLOSE",
     turns: [
-      turn(spec.id, 0, "agent", "GREETING", "Rivera Plumbing, you're speaking with an automated assistant.", greet),
+      turn(spec.id, 0, "agent", "GREETING", GREETING, greet),
       turn(spec.id, 1, "caller", "TRIAGE", spec.summary),
       turn(spec.id, 2, "agent", "QUALIFY", "Understood. What's the service address?", capture),
       turn(spec.id, 3, "caller", "QUALIFY", spec.address),
@@ -398,6 +413,23 @@ export const METRICS = computeMetrics({
   outcomes: OUTCOMES,
   committedBookings: BOOKED.length,
 });
+
+/**
+ * The compliance budget with no budget (plan, Step 8).
+ *
+ * `checkBudgets()` has targets we argue about — 96% turn-take is an engineering trade-off.
+ * This one is not a trade-off: a call that was answered and never told the caller they were
+ * talking to a machine is a violation, and one is too many. So the dashboard shows the rate
+ * *and* names the calls, because a percentage is not something anybody can go and fix.
+ *
+ * It is computed from the same turns every other number on the page is, which is the only
+ * way it means anything: it scores what was **actually spoken**, verbatim, rather than what
+ * the catalog says we would have spoken.
+ */
+export const DISCLOSURE = auditDisclosure(
+  CALLS.map((c) => c.record.id),
+  CALLS.flatMap((c) => [...c.turns]),
+);
 
 /**
  * The number we are *entitled* to show, and why (plan, Step 6.3).

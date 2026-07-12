@@ -1,3 +1,8 @@
+import {
+  recordingDecision,
+  redactPan,
+  type RecordingDecision,
+} from "@ledgerline/compliance";
 import type {
   BookingSink,
   CallTurn,
@@ -7,6 +12,7 @@ import type {
   FaqAnswerer,
   HazardDetection,
   Locale,
+  Recorder,
   SlotExtractor,
   SlotKey,
   SlotValueMap,
@@ -53,11 +59,28 @@ import { validateSlot } from "./validate.js";
  * - **Every turn is traced** (principle #5). Each spoken sentence and each heard
  *   utterance becomes a `CallTurn`, so `computeMetrics()` / `checkBudgets()` run
  *   over exactly what the caller experienced.
+ * - **The notice comes before the tape, and the card never arrives at all** (Step 8).
+ *   `hear`/`hearPartial` are the only two doors a caller's words enter this system
+ *   through, and both redact a card number before the classifier, the extractor, the
+ *   trace, and therefore before Anthropic, Postgres, and the CRM. `Recorder.begin()`
+ *   is called by this class and nothing else, and — unless both ends of the call are
+ *   known one-party-consent states — never before the caller has *heard* the AI
+ *   disclosure.
  */
 export interface CallRuntimeDeps {
   readonly extractor: SlotExtractor;
   readonly utterer: Utterer;
   readonly voice: VoiceSession;
+  /**
+   * Optional, and its absence means **no recording** — which is the right default for
+   * a caller whose consent regime nobody has worked out yet.
+   */
+  readonly recorder?: Recorder;
+  /**
+   * The caller's number as the carrier presented it. `null` for a withheld or
+   * unreadable one, which lands in the strictest consent regime (`packages/compliance`).
+   */
+  readonly callerE164?: string | null;
   /**
    * Call site #3 (plan, §6). Optional: a tenant with no FAQ has no answers to
    * select from, and a caller's question then costs them a reprompt, exactly as
@@ -76,6 +99,15 @@ export interface CallRuntimeDeps {
     readonly businessName: string;
     /** IANA zone of the tenant. A window on the wrong day is a truck on the wrong day. */
     readonly timeZone: string;
+    /**
+     * USPS code of the contractor's own state — the one end of the call whose location
+     * we actually know. Optional, and an absent one is `UNKNOWN`, which is all-party.
+     */
+    readonly stateCode?: string;
+    /** Off unless the contractor turned it on. See `recordingDecision()`. */
+    readonly recordingEnabled?: boolean;
+    /** The DPA version they accepted. A stale one is treated as none at all. */
+    readonly dpaVersion?: string | null;
   };
   /** Must be a UUID: it is the `callId` on every `CallTurn` and the booking. */
   readonly callId: string;
@@ -117,6 +149,14 @@ export class CallRuntime {
   /** Questions answered on this call. Bounded — see `maxFaqAnswers`. */
   private faqAnswers = 0;
 
+  /**
+   * Decided once, at construction, from facts that cannot change mid-call — and kept,
+   * because "we recorded this call, and here is what we believed entitled us to" is the
+   * sentence a regulator asks for and a `boolean` cannot answer.
+   */
+  private readonly recording: RecordingDecision;
+  private recorderStarted = false;
+
   constructor(private readonly deps: CallRuntimeDeps) {
     this.options = {
       guards: makeGuards(deps.serviceArea),
@@ -124,12 +164,31 @@ export class CallRuntime {
         ? { maxExtractionFailures: deps.maxExtractionFailures }
         : {}),
     };
+
+    this.recording = recordingDecision(deps.callerE164 ?? null, {
+      // Every default here is the strict one. A tenant whose compliance columns nobody
+      // has filled in is a tenant we do not record — the cost of an unfinished
+      // onboarding must be a missing feature, never an unlawful recording.
+      stateCode: deps.tenant.stateCode ?? "",
+      recordingEnabled: deps.tenant.recordingEnabled ?? false,
+      dpaVersion: deps.tenant.dpaVersion ?? null,
+    });
   }
 
   /* ---- observation ---- */
 
   get context(): MachineContext {
     return this.ctx;
+  }
+
+  /** What we concluded about recording this call, and why. Belongs on the call record. */
+  get recordingDecision(): RecordingDecision {
+    return this.recording;
+  }
+
+  /** Whether a tape actually exists. `false` on every call with no `Recorder` bound. */
+  get isRecording(): boolean {
+    return this.recorderStarted;
   }
 
   /** Every turn, agent and caller, in order — the input to `computeMetrics()`. */
@@ -152,8 +211,14 @@ export class CallRuntime {
    * runtime asks `nextPrompt` what to say — and is told to `GREET`, which is how
    * the AI disclosure reaches the caller before the `greeting_delivered` guard
    * will let the call move (plan, Step 3 surprise #2).
+   *
+   * `RECORD_FROM_ANSWER` is the only path on which a recorder starts here, before a
+   * word has been said, and `packages/compliance` reaches it only when *both* ends of
+   * the call are known one-party-consent states. Every other call — including every
+   * call we simply cannot place — begins its tape after the disclosure, below.
    */
   async start(): Promise<void> {
+    if (this.recording.mode === "RECORD_FROM_ANSWER") await this.beginRecording();
     await this.performEffects(nextPrompt(this.ctx));
   }
 
@@ -162,8 +227,9 @@ export class CallRuntime {
    * text reaches any model (principle #4). Returns the detection so the worker
    * can stop feeding audio; the escalation is already under way.
    */
-  async hearPartial(text: string): Promise<HazardDetection | null> {
+  async hearPartial(rawText: string): Promise<HazardDetection | null> {
     if (this.done) return null;
+    const text = redactPan(rawText);
     const detection = classify(text, { outdoorTempF: this.deps.outdoorTempF ?? null });
     if (!detection) return null;
     this.traceCaller(text);
@@ -175,12 +241,21 @@ export class CallRuntime {
   }
 
   /**
-   * A completed caller turn. Classified once more (a hazard stated only on the
-   * final still transfers), then dispatched against whatever the last prompt
+   * A completed caller turn. Redacted, classified once more (a hazard stated only on
+   * the final still transfers), then dispatched against whatever the last prompt
    * armed.
+   *
+   * **The redaction is the first statement in the method, and that placement is the
+   * point** (Step 8). `text` from here on is the only version of the caller's words
+   * this process holds: it is what the classifier reads, what the extractor is sent,
+   * what the FAQ model is asked about, and what the `CallTurn` carries into the
+   * database. A card number the caller volunteers unasked has no path past this line,
+   * which is what makes "we never take payment on the call" a fact about the system
+   * rather than an intention of ours.
    */
-  async hear(text: string): Promise<void> {
+  async hear(rawText: string): Promise<void> {
     if (this.done) return;
+    const text = redactPan(rawText);
     this.traceCaller(text);
     this.callerTurnIndex += 1;
 
@@ -210,8 +285,34 @@ export class CallRuntime {
   async callerHungUp(): Promise<void> {
     if (this.done) return;
     await this.drive({ type: "CALLER_HUNG_UP" });
+    await this.finish();
+  }
+
+  /* ---- recording (Step 8) ---- */
+
+  /**
+   * Start the tape. Called from exactly two places — `start()`, on the one-party path,
+   * and the `GREET` effect, once the disclosure has been *spoken* — and never twice.
+   */
+  private async beginRecording(): Promise<void> {
+    if (this.recorderStarted) return;
+    if (!this.deps.recorder) return;
+    await this.deps.recorder.begin();
+    this.recorderStarted = true;
+  }
+
+  /**
+   * Every terminal path runs through here, which is why it exists.
+   *
+   * A recorder stopped on the booking path and forgotten on the escalation path is a
+   * gas-leak call that keeps recording after the caller has been handed to a human —
+   * and the escalation path is precisely the one nobody thinks about, because it is
+   * the one where something has already gone wrong.
+   */
+  private async finish(): Promise<void> {
     this.done = true;
     this.expecting = null;
+    if (this.recorderStarted && this.deps.recorder) await this.deps.recorder.stop();
   }
 
   /* ---- effect performance ---- */
@@ -231,11 +332,22 @@ export class CallRuntime {
 
   private async performOne(effect: Effect): Promise<void> {
     switch (effect.type) {
-      case "GREET":
-        await this.speak(effect);
+      case "GREET": {
+        const outcome = await this.speak(effect);
+
+        // **The notice, and only then the tape** (Step 8). `outcome.spoke` is the whole
+        // condition: a greeting the TTS never produced is a disclosure the caller never
+        // heard, and audio captured after it would be audio captured without notice. So
+        // a silent greeting is not merely a `turnTakeOk` miss on a dashboard — it is a
+        // call that does not get recorded, and the two facts come from the same field.
+        if (this.recording.mode === "RECORD_AFTER_NOTICE" && outcome.spoke) {
+          await this.beginRecording();
+        }
+
         // The disclosure has now been spoken; let the guard pass and advance.
         await this.drive({ type: "AGENT_GREETED" });
         return;
+      }
 
       case "ASK_FOR":
         await this.speak(effect);
@@ -256,8 +368,7 @@ export class CallRuntime {
           await this.drive({ type: "HAZARD_GUIDANCE_DELIVERED" });
         }
         await this.finishEscalation(effect);
-        this.done = true;
-        this.expecting = null;
+        await this.finish();
         return;
       }
 
@@ -280,8 +391,7 @@ export class CallRuntime {
             locale: this.deps.locale ?? "en",
           }),
         );
-        this.done = true;
-        this.expecting = null;
+        await this.finish();
         return;
     }
   }

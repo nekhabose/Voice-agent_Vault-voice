@@ -1,5 +1,5 @@
 {
-  "name": "@ledgerline/utterance",
+  "name": "@ledgerline/compliance",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,7 +9,6 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@ledgerline/compliance": "*",
     "@ledgerline/contracts": "*"
   }
 }

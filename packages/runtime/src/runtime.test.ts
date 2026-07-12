@@ -16,9 +16,15 @@ import { checkBudgets, computeMetrics } from "@ledgerline/telemetry";
 import { AI_DISCLOSURE, CATALOG, CachedUtterer } from "@ledgerline/utterance";
 import { FakeGeocoder, weekdayHours, type AddressInput } from "@ledgerline/validators";
 import { initialContext } from "@ledgerline/conversation";
+import { DPA_VERSION } from "@ledgerline/compliance";
 import { CallRuntime, isAffirmative, isQuestion, type CallRuntimeDeps } from "./runtime.js";
 import { buildPendingBooking } from "./booking.js";
-import { FakeBookingSink, FakeVoiceSession, SILENT_SPEECH_OUTCOME } from "./fakes.js";
+import {
+  FakeBookingSink,
+  FakeRecorder,
+  FakeVoiceSession,
+  SILENT_SPEECH_OUTCOME,
+} from "./fakes.js";
 
 /* -------------------------------------------------------------------------- */
 /* Fixtures                                                                    */
@@ -662,4 +668,247 @@ describe("isQuestion", () => {
       expect(isQuestion(text)).toBe(false);
     },
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/* Step 8 — the notice, then the tape                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A tenant configured for recording: Texas (one-party), switched on, DPA current.
+ * Every test below changes exactly one of those and watches the gate close.
+ */
+const RECORDING_TENANT: CallRuntimeDeps["tenant"] = {
+  tenantId: TENANT_ID,
+  businessName: "Ace Plumbing",
+  timeZone: "America/New_York",
+  stateCode: "TX",
+  recordingEnabled: true,
+  dpaVersion: DPA_VERSION,
+};
+
+/** A Texas caller: one-party at both ends, which is the only way to record from answer. */
+const TEXAS_CALLER = "+15125551234";
+/** A Californian: all-party, so the notice comes first, whoever they called. */
+const CALIFORNIA_CALLER = "+14155551234";
+
+function recordingHarness(
+  overrides: {
+    readonly callerE164?: string | null;
+    readonly tenant?: Partial<CallRuntimeDeps["tenant"]>;
+    readonly speech?: SpeechOutcome;
+  } = {},
+): Harness & { readonly recorder: FakeRecorder } {
+  const voice = new FakeVoiceSession(overrides.speech ? { default: overrides.speech } : {});
+  const recorder = new FakeRecorder(() => voice.spoken);
+
+  const h = harness({
+    voice,
+    recorder,
+    callerE164: overrides.callerE164 === undefined ? CALIFORNIA_CALLER : overrides.callerE164,
+    tenant: { ...RECORDING_TENANT, ...overrides.tenant },
+  });
+
+  return { ...h, voice, recorder };
+}
+
+describe("the recording gate", () => {
+  /**
+   * The assertion is not "did we record". It is **what had the caller heard by the time
+   * we started recording them** — the compliance question, put the way a regulator puts
+   * it — and `FakeRecorder` snapshots the transcript at `begin()` so a test can answer it.
+   *
+   * One sentence, and it is the AI disclosure. The tape starts after it, never before.
+   */
+  it("starts the tape only after the caller has heard the disclosure", async () => {
+    const h = recordingHarness();
+    await h.runtime.start();
+
+    expect(h.runtime.recordingDecision.mode).toBe("RECORD_AFTER_NOTICE");
+    expect(h.recorder.heardBeforeRecording).toHaveLength(1);
+    expect(h.recorder.heardBeforeRecording![0]).toContain(AI_DISCLOSURE);
+  });
+
+  /**
+   * The one path on which audio exists before we have said anything, and
+   * `packages/compliance` reaches it only when *both* ends of the call are known
+   * one-party states. A Texan phoning a Texas shop.
+   */
+  it("records from answer when both ends are one-party states", async () => {
+    const h = recordingHarness({ callerE164: TEXAS_CALLER });
+    await h.runtime.start();
+
+    expect(h.runtime.recordingDecision.mode).toBe("RECORD_FROM_ANSWER");
+    expect(h.recorder.heardBeforeRecording).toEqual([]);
+  });
+
+  /**
+   * The failure mode that ties Step 8 to principle #5, and the reason `speak()` returns a
+   * `SpeechOutcome` at all.
+   *
+   * `spoke: false` is the TTS producing no audio — the silence Full-Duplex-Bench-v3 found
+   * in the *fastest* model in its field. The greeting was rendered, logged, and never
+   * heard. To `checkBudgets()` that is a turn-take miss. To us it is a call in which the
+   * caller was never told they were talking to a machine, and therefore a call we may not
+   * record — and both readings come out of the same boolean.
+   */
+  it("does not start the tape when the greeting was rendered but never spoken", async () => {
+    const h = recordingHarness({ speech: SILENT_SPEECH_OUTCOME });
+    await h.runtime.start();
+
+    expect(h.runtime.isRecording).toBe(false);
+    expect(h.recorder.heardBeforeRecording).toBeNull();
+  });
+
+  it("does not record when the contractor has not enabled it", async () => {
+    const h = recordingHarness({ tenant: { recordingEnabled: false } });
+    await h.runtime.start();
+
+    expect(h.runtime.recordingDecision.mode).toBe("DO_NOT_RECORD");
+    expect(h.recorder.heardBeforeRecording).toBeNull();
+  });
+
+  it("does not record for a contractor who has accepted no DPA", async () => {
+    const h = recordingHarness({ tenant: { dpaVersion: null } });
+    await h.runtime.start();
+
+    expect(h.runtime.recordingDecision.mode).toBe("DO_NOT_RECORD");
+    expect(h.runtime.isRecording).toBe(false);
+  });
+
+  /**
+   * The default a half-finished onboarding produces. `CallRuntimeDeps.tenant` carries the
+   * three compliance fields as *optional*, and every one of them defaults to the strict
+   * value — so a tenant nobody configured records nobody, and the cost of forgetting is a
+   * missing feature rather than an unlawful recording.
+   */
+  it("records nobody for a tenant whose compliance columns nobody filled in", async () => {
+    const voice = new FakeVoiceSession();
+    const recorder = new FakeRecorder(() => voice.spoken);
+    const h = harness({ voice, recorder, callerE164: TEXAS_CALLER });
+
+    await h.runtime.start();
+    expect(h.runtime.recordingDecision.mode).toBe("DO_NOT_RECORD");
+    expect(recorder.heardBeforeRecording).toBeNull();
+  });
+
+  /** No recorder bound is the same as no recording, and it must not throw. */
+  it("runs a whole call with no recorder at all", async () => {
+    const h = await bookHappyPath();
+    expect(h.runtime.isRecording).toBe(false);
+    expect(h.sink.submitted).toHaveLength(1);
+  });
+
+  it("stops the tape when the call ends in a booking", async () => {
+    const h = recordingHarness({ callerE164: TEXAS_CALLER });
+    await bookHappyPath(h);
+    expect(h.recorder.stopped).toBe(true);
+  });
+
+  /**
+   * The path nobody thinks about, because it is the one where something has already gone
+   * wrong. A gas-leak call that keeps recording after the caller has been handed to a
+   * human is a recording nobody knows exists.
+   */
+  it("stops the tape when the call ends in an emergency transfer", async () => {
+    const h = recordingHarness({ callerE164: TEXAS_CALLER });
+    await h.runtime.start();
+    await h.runtime.hearPartial("I smell gas in the kitchen");
+
+    expect(h.voice.transfers).toHaveLength(1);
+    expect(h.recorder.stopped).toBe(true);
+  });
+
+  it("stops the tape when the caller hangs up", async () => {
+    const h = recordingHarness({ callerE164: TEXAS_CALLER });
+    await h.runtime.start();
+    await h.runtime.callerHungUp();
+    expect(h.recorder.stopped).toBe(true);
+  });
+
+  /** Every terminal path runs through `finish()`, and `begin()` is called at most once. */
+  it("never starts the tape twice", async () => {
+    const h = recordingHarness({ callerE164: TEXAS_CALLER });
+    await h.runtime.start();
+    await h.runtime.start();
+    expect(h.recorder.heardBeforeRecording).toEqual([]);
+  });
+
+  /** The audit record: "we recorded this call, and here is what we believed entitled us to." */
+  it("keeps the reason it reached its verdict", async () => {
+    const h = recordingHarness();
+    expect(h.runtime.recordingDecision.consent.regime).toBe("ALL_PARTY");
+    expect(h.runtime.recordingDecision.reason).toContain("caller's CA");
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Step 8 — the card that never arrives                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * "PCI scope avoided entirely by never taking payment on the call" is a claim about *us*,
+ * and PCI scope is decided by whether cardholder data is in our systems. We never ask for
+ * a card. A caller can still read one out, and these tests are what make "never" true of
+ * the system rather than of our intentions.
+ */
+describe("PAN redaction", () => {
+  const VISA = "4111111111111111";
+
+  /**
+   * The load-bearing one. `hear()` redacts as its first statement, so the extractor — and
+   * therefore Anthropic — is handed the redacted text and nothing else. `FakeExtractor`
+   * records what it was asked, which is how we can assert on what a live model *would*
+   * have seen.
+   */
+  it("never sends the caller's card number to the model", async () => {
+    const h = harness();
+    await h.runtime.start();
+    await h.runtime.hear(`It's Rosa Peña, and my card is ${VISA} if you need it`);
+
+    const asked = h.extractor.calls.map((call) => call.utterance);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).not.toContain(VISA);
+    expect(asked[0]).toContain("[card number redacted]");
+    // The rest of the turn survives, so the slot is still filled from it.
+    expect(asked[0]).toContain("Rosa Peña");
+  });
+
+  /** The trace is what becomes `call_turns.text`. The card must not reach the database. */
+  it("never writes the caller's card number to the call trace", async () => {
+    const h = harness();
+    await h.runtime.start();
+    await h.runtime.hear(`It's Rosa Peña, my card is ${VISA}`);
+
+    const traced = h.runtime.callTurns.filter((t) => t.role === "caller").map((t) => t.text);
+    expect(traced.join(" ")).not.toContain(VISA);
+    expect(traced.join(" ")).toContain("[card number redacted]");
+  });
+
+  /**
+   * `hearPartial` is the other door, and it is the one that runs on *every ASR partial* —
+   * so it is the door a card number is most likely to arrive through, mid-sentence, before
+   * the caller has finished saying it.
+   */
+  it("redacts an ASR partial too", async () => {
+    const h = harness();
+    await h.runtime.start();
+    await h.runtime.hearPartial(`there's a gas smell, and my card is ${VISA}`);
+
+    const traced = h.runtime.callTurns.filter((t) => t.role === "caller").map((t) => t.text);
+    expect(traced.join(" ")).not.toContain(VISA);
+    // And the hazard still fires. Redaction runs first and changes nothing the classifier
+    // cares about — a card number is not a gas leak, and neither one waits for the other.
+    expect(h.voice.transfers).toHaveLength(1);
+  });
+
+  /**
+   * The regression that would matter most. The phone slot is a ten-digit number the caller
+   * reads out, and a redactor that ate it would break the booking for every caller — which
+   * is why `redactPan` requires 13 digits and a Luhn check on anything separated.
+   */
+  it("does not eat the caller's own callback number", async () => {
+    const h = await bookHappyPath();
+    expect(h.sink.submitted[0]!.customer.phone).toBe("+13055551234");
+  });
 });

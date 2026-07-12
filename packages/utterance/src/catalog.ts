@@ -1,3 +1,4 @@
+import { AI_DISCLOSURE } from "@ledgerline/compliance";
 import type {
   EscalationAction,
   EscalationReason,
@@ -34,17 +35,18 @@ export type Placeholder = (typeof PLACEHOLDERS)[number];
 /**
  * The AI disclosure, spoken verbatim at the top of every call.
  *
- * California's AB 3030 lineage and the general FTC posture both want *clear*
- * disclosure that the caller is not talking to a person, before the
- * conversation begins. The `greeting_delivered` guard makes it a precondition
- * of leaving GREETING, and `LlmUtterer` refuses to paraphrase it.
+ * **It lives in `@ledgerline/compliance` now, and this is a re-export** — the same
+ * move `machine.ts` makes with `Effect`: defined where it is *governed*, re-exported
+ * where it is *produced*. Step 8 gave it a version, an audit that scores whether real
+ * callers heard it verbatim, and a second job (`recordingDecision` treats the recording
+ * notice inside it as the consent), and a string three packages reason about does not
+ * belong in one package's catalog.
  *
- * **Do not reword this string in a "tone" pass.** It is legal text that happens
- * to be spoken. If it must change, it changes here, in a commit a lawyer can
- * read, and Step 8 hears about it.
+ * **Do not reword it in a "tone" pass.** It is legal text that happens to be spoken.
+ * If it must change, it changes in `compliance/src/disclosure.ts`, with
+ * `DISCLOSURE_VERSION`, in a commit a lawyer can read.
  */
-export const AI_DISCLOSURE =
-  "Just so you know, you're speaking with an automated assistant, not a person, and this call may be recorded. You can ask for a human at any time.";
+export { AI_DISCLOSURE };
 
 export interface AskForms {
   readonly initial: string;

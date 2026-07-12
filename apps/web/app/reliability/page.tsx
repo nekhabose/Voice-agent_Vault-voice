@@ -1,7 +1,12 @@
+import {
+  DPA_VERSION,
+  RECORDING_RETENTION_DAYS,
+  TRANSCRIPT_RETENTION_DAYS,
+} from "@ledgerline/compliance";
 import { AUDIT_AGREEMENT_FLOOR, MIN_AUDITED_OUTCOMES } from "@ledgerline/telemetry";
 import { invoiceFor } from "@ledgerline/billing";
 import { Stat } from "@/components/Bits";
-import { BOOKED, METRICS, OUTCOMES, PUBLISHED, TENANT, pct } from "@/lib/demo-data";
+import { BOOKED, DISCLOSURE, METRICS, OUTCOMES, PUBLISHED, TENANT, pct } from "@/lib/demo-data";
 
 /**
  * The reliability page — "the reliability numbers as the pitch, not a tab" (plan, Step 7).
@@ -106,6 +111,34 @@ export default function Reliability() {
               (invoice.staleTriage > 0
                 ? ` ${invoice.staleTriage} of those is still unclassified, and stays unbilled until it is.`
                 : "")}
+        </p>
+      </section>
+
+      {/*
+        Compliance, on the reliability page rather than in a policy PDF, for the same reason
+        the correction rate is here rather than in a footnote: a promise nobody can check is
+        a promise nobody made.
+
+        The disclosure rate is the one number on this page with no acceptable value but
+        100%. `checkBudgets()` argues about 96% turn-take because that is an engineering
+        trade-off; a caller who was never told they were talking to a machine is not a
+        trade-off. And it is scored against what was *actually spoken*, verbatim — a
+        paraphrase counts as a failure, which is how a model that "helpfully" rewords the
+        greeting shows up here rather than nowhere.
+      */}
+      <section className="panel">
+        <h2>What every caller was told</h2>
+        <p className="published tabular">{pct(DISCLOSURE.rate)}</p>
+        <p className={DISCLOSURE.rate === 1 ? "quiet" : "alarm"}>
+          {DISCLOSURE.rate === 1
+            ? `All ${DISCLOSURE.calls} callers heard the AI disclosure, word for word, before anything else.`
+            : `${DISCLOSURE.undisclosed.length} of ${DISCLOSURE.calls} callers did not hear it: ${DISCLOSURE.undisclosed.join(", ")}.`}
+        </p>
+        <p className="reason">
+          Recordings are deleted after {RECORDING_RETENTION_DAYS} days and transcripts after{" "}
+          {TRANSCRIPT_RETENTION_DAYS}; the latency and turn-taking figures above outlive both,
+          because they never contained a caller. Data processing addendum {DPA_VERSION} — and
+          without a current one, we record nobody.
         </p>
       </section>
     </main>

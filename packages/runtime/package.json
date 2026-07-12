@@ -9,6 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@ledgerline/compliance": "*",
     "@ledgerline/contracts": "*",
     "@ledgerline/conversation": "*",
     "@ledgerline/safety": "*",

@@ -7,20 +7,24 @@ import {
   type BookingStore,
   type ClassificationRecord,
   type DueBooking,
+  type ExpiredRecording,
   type FaqIndex,
   type HumanLabelRecord,
   type IndexedFaqEntry,
   type JobSnapshotRecord,
   type OutcomeStore,
+  type RetentionStore,
   type RetrievedFaqEntry,
   type SnapshotStore,
   type TriageCase,
   type TriageStore,
 } from "@ledgerline/contracts";
-import { and, asc, eq, gte, lt, sql } from "drizzle-orm";
+import { and, asc, eq, gte, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { Queryable } from "./client.js";
 import {
   bookings,
+  callTurns,
+  calls,
   faqEntries,
   jobSnapshots,
   outcomes,
@@ -345,6 +349,105 @@ export class PgFaqStore {
 
 /** pgvector's literal is `[1,0,...]`, and it is a bind parameter, never interpolated. */
 const toVector = (embedding: readonly number[]): string => `[${embedding.join(",")}]`;
+
+/* -------------------------------------------------------------------------- */
+/* Retention — what we promised to forget (Step 8)                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The deletion job's view of `calls`.
+ *
+ * **Every method here is an `UPDATE`, and there is no `DELETE` in the class.** Not
+ * because we forgot one: the app role holds no `DELETE` privilege on `calls` or
+ * `call_turns` at all (migration `0002` — "a call is evidence"), so a `delete()` here
+ * would compile, ship, and be refused by Postgres in production. Retention therefore
+ * *redacts*: the row survives, the metrics survive, and the words do not.
+ *
+ * The queries are `IS NULL`-guarded on the tombstones rather than on `recording_url`,
+ * which is what makes the job re-entrant. A run that deleted the media and crashed
+ * before writing the tombstone leaves the call in the working set, the second attempt
+ * gets `already_absent` from the archive, and the tombstone lands. A job keyed on "has
+ * a URL" would instead treat a successful deletion as unfinished work forever.
+ */
+export class PgRetentionStore implements RetentionStore {
+  constructor(
+    private readonly db: Queryable,
+    private readonly tenantId: string,
+  ) {}
+
+  async expiredRecordings(before: Date, limit: number): Promise<readonly ExpiredRecording[]> {
+    const rows = await this.db
+      .select({ callId: calls.id, recordingUrl: calls.recordingUrl })
+      .from(calls)
+      .where(
+        and(
+          eq(calls.tenantId, this.tenantId),
+          lt(calls.startedAt, before),
+          isNotNull(calls.recordingUrl),
+          isNull(calls.recordingDeletedAt),
+        ),
+      )
+      .orderBy(asc(calls.startedAt))
+      .limit(limit);
+
+    // `isNotNull` above already established this; the narrowing is for the compiler,
+    // which cannot read a `WHERE` clause.
+    return rows.flatMap((row) =>
+      row.recordingUrl === null ? [] : [{ callId: row.callId, recordingUrl: row.recordingUrl }],
+    );
+  }
+
+  /**
+   * The media is gone from the vendor. Record *both* facts: the URL no longer points at
+   * anything, and the reason it does not is that we deleted it on this date.
+   */
+  async markRecordingDeleted(callId: string, at: Date): Promise<void> {
+    await this.db
+      .update(calls)
+      .set({ recordingUrl: null, recordingDeletedAt: at })
+      .where(and(eq(calls.id, callId), eq(calls.tenantId, this.tenantId)));
+  }
+
+  async expiredTranscripts(before: Date, limit: number): Promise<readonly string[]> {
+    const rows = await this.db
+      .select({ callId: calls.id })
+      .from(calls)
+      .where(
+        and(
+          eq(calls.tenantId, this.tenantId),
+          lt(calls.startedAt, before),
+          isNull(calls.transcriptRedactedAt),
+        ),
+      )
+      .orderBy(asc(calls.startedAt))
+      .limit(limit);
+
+    return rows.map((row) => row.callId);
+  }
+
+  /**
+   * The words, blanked. The numbers, untouched.
+   *
+   * `text = ''` rather than a `DELETE` of the turn rows — which we could not do anyway
+   * — and that constraint turned out to be the right design. `first_word_latency_ms`,
+   * `barge_in`, and `turn_take_ok` are what `computeMetrics()` reads; none of them is
+   * the caller's words. So the reliability numbers this company exists to publish can
+   * still be recomputed, from scratch, over a database that has forgotten every caller
+   * who ever phoned. A retention policy that cost us the measurement would be a policy
+   * somebody would eventually argue their way out of.
+   */
+  async redactTranscript(callId: string, at: Date): Promise<void> {
+    await this.db
+      .update(callTurns)
+      .set({ text: "" })
+      .where(and(eq(callTurns.callId, callId), eq(callTurns.tenantId, this.tenantId)));
+
+    await this.db
+      .update(calls)
+      .set({ transcriptRedactedAt: at, transcriptUrl: null })
+      .where(and(eq(calls.id, callId), eq(calls.tenantId, this.tenantId)));
+  }
+}
 
 /* -------------------------------------------------------------------------- */
 

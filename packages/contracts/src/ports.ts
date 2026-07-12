@@ -250,6 +250,53 @@ export interface BookingSink {
   submit(payload: PendingBookingPayload): Promise<void>;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Recording (Step 8)                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The thing that captures the caller's voice — and, far more importantly, the thing
+ * that does not.
+ *
+ * **`CallRuntime` is the only caller of `begin()`, and the carrier must not be
+ * configured to record on its own.** That is the boundary this port exists to draw. A
+ * telephony vendor asked to `record=true` on answer starts the tape before anybody has
+ * said anything, and no amount of correct logic on our side unmakes those seconds.
+ * `packages/compliance` decides *whether*, `CallRuntime` decides *when*, and the
+ * deployment's one job is to leave the carrier's own recording switch off
+ * (`docs/COMPLIANCE.md`).
+ *
+ * Separate from {@link VoiceSession} on purpose, even though the same worker implements
+ * both. `VoiceSession` is what we say to the caller; this is what we keep of what they
+ * say to us, and the two are governed by different law. A `say()` that also started a
+ * recording would be a compliance decision hidden inside an audio one.
+ */
+export interface Recorder {
+  /**
+   * Start capturing. Called at most once per call, and never before the consent regime
+   * permits it — which, in every state whose law we cannot name, means never before the
+   * caller has *heard* the AI disclosure.
+   */
+  begin(): Promise<void>;
+  /** The call is over. Called only if `begin()` was. */
+  stop(): Promise<void>;
+}
+
+/** A recording deleted, or one the vendor had already lost. Both mean: it is gone. */
+export type RecordingDeletion = "deleted" | "already_absent";
+
+/**
+ * Where a recording actually lives, and what deletes it.
+ *
+ * The retention job nulls a column; this makes that column true. A `RetentionStore`
+ * without a `RecordingArchive` behind it is a database that has forgotten about a
+ * recording somebody else is still holding.
+ */
+export interface RecordingArchive {
+  /** Throws if the vendor may still be holding the media. See `HttpRecordingArchive`. */
+  delete(recordingUrl: string): Promise<RecordingDeletion>;
+}
+
 /** Injected so retry backoff does not make the test suite slow. */
 export type Sleep = (milliseconds: number) => Promise<void>;
 

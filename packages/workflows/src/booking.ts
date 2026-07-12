@@ -1,3 +1,4 @@
+import { transactionalSms } from "@ledgerline/compliance";
 import {
   PendingBookingPayloadSchema,
   type Clock,
@@ -133,17 +134,20 @@ export async function commitBooking(
   // The SMS sits outside the transaction on purpose. You cannot unsend a text,
   // and cancelling a correctly-booked job because a carrier hiccuped would turn
   // a notification problem into a lost customer.
+  //
+  // `transactionalSms` is the only way to build a message `SmsSender` will accept, and
+  // it takes the booking rather than a number (Step 8). The destination is not a
+  // decision this function gets to make: it is `booking.customer.phone`, the slot the
+  // caller gave us and heard read back.
   let smsDelivered = true;
   try {
     await saga.step(BOOKING_STEPS.sms, async () => {
-      await deps.sms.send({
-        to: booking.customer.phone,
-        body: confirmationBody(
-          booking.address.formatted,
-          booking.window,
-          deps.timeZone,
+      await deps.sms.send(
+        transactionalSms(
+          booking,
+          confirmationBody(booking.address.formatted, booking.window, deps.timeZone),
         ),
-      });
+      );
       return null;
     });
   } catch {

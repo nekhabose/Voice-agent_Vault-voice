@@ -104,6 +104,30 @@ export const tenants = pgTable("tenants", {
   crmProvider: crmProviderEnum("crm_provider").notNull(),
   /** Encrypted at the application boundary. Never selected into a log line. */
   crmCredentials: text("crm_credentials_enc").notNull(),
+  /**
+   * USPS code of the contractor's own state — the one end of a call whose location we
+   * actually know (`packages/compliance`, `assessConsent`).
+   *
+   * `XX` is not a state, and that is the default on purpose: an unconfigured tenant
+   * resolves to `UNKNOWN`, which is the all-party branch, which means notice before
+   * recording. **A `NOT NULL DEFAULT` that fails safe is the cheapest compliance
+   * control in this file**, because it is the one that applies to the rows nobody
+   * remembered to fill in.
+   */
+  stateCode: text("state_code").notNull().default("XX"),
+  /** Off until the contractor turns it on. An unfinished onboarding records nobody. */
+  recordingEnabled: boolean("recording_enabled").notNull().default(false),
+  /**
+   * The DPA version this contractor accepted (`compliance/src/dpa.ts`), or null.
+   *
+   * A version rather than a boolean, because what somebody agreed to is a document with
+   * contents — and a *stale* acceptance stops recording just as a missing one does
+   * (`recordingDecision`). Bumping `DPA_VERSION` therefore costs us recordings until
+   * every tenant re-accepts, which is what makes the bump a thing somebody reads.
+   */
+  dpaVersion: text("dpa_version"),
+  dpaAcceptedAt: timestamp("dpa_accepted_at", { withTimezone: true }),
+  dpaAcceptedBy: text("dpa_accepted_by"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -177,9 +201,32 @@ export const calls = pgTable(
     containment: boolean("containment").notNull().default(false),
     recordingUrl: text("recording_url"),
     transcriptUrl: text("transcript_url"),
+    /**
+     * The retention tombstones (Step 8). **Facts, not absences.**
+     *
+     * A null `recording_url` could mean the call was never recorded, that the carrier
+     * lost it, or that we deleted it as promised — three very different sentences, and
+     * a deletion policy whose evidence is a *missing value* can prove none of them.
+     * Same reasoning as "absence is never a correction" (principle #5): what a system
+     * failed to say is not a claim about the world.
+     *
+     * Written only after the media is gone from the vendor (`runRetention`), never
+     * before.
+     */
+    recordingDeletedAt: timestamp("recording_deleted_at", { withTimezone: true }),
+    /**
+     * Every `call_turns.text` on this call has been blanked.
+     *
+     * The latency, barge-in, and turn-take columns survive it, so `computeMetrics()`
+     * still scores a call whose words we have forgotten — which is what lets the
+     * retention promise and the measurement promise both be kept.
+     */
+    transcriptRedactedAt: timestamp("transcript_redacted_at", { withTimezone: true }),
   },
   (table) => [
     index("calls_tenant_started_idx").on(table.tenantId, table.startedAt),
+    // The retention cron's working set: the calls that still owe a deletion.
+    index("calls_retention_idx").on(table.startedAt),
     // The target of every child's composite FK. `id` is already unique; Postgres
     // still requires a unique constraint on the exact referenced column pair.
     unique("calls_id_tenant_key").on(table.id, table.tenantId),

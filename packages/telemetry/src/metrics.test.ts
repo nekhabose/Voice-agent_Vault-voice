@@ -495,3 +495,43 @@ describe("checkBudgets", () => {
     expect(breaches).toHaveLength(4);
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* Step 8 — the retention interlock                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * **The reliability numbers outlive the words they were computed beside.**
+ *
+ * Step 8's retention job blanks `call_turns.text` and leaves the latency, barge-in, and
+ * turn-take columns standing, and this is the assertion that makes that safe: every metric
+ * in this file is computed from turn *shape*, never turn *content*.
+ *
+ * It reads like a tautology and it is not. The obvious way to build any of these — a
+ * containment heuristic over the transcript, a barge-in detector that looks for a cut-off
+ * word — would have coupled the number we publish to the caller's own words, and a
+ * retention policy would then have been a choice between deleting somebody's voice and
+ * being able to prove our error rate. Nobody would have made that choice on purpose; it
+ * would have been discovered, late, by somebody looking for a way out of it.
+ *
+ * So: same calls, same turns, every `text` blanked. Identical metrics.
+ */
+describe("computeMetrics survives a retention purge", () => {
+  const calls = [call("BOOKED"), call("ESCALATED_OTHER")];
+  const turns: CallTurn[] = [
+    agentTurn({ firstWordLatencyMs: 300, turnLatencyMs: 800 }),
+    agentTurn({ firstWordLatencyMs: 900, turnLatencyMs: 1_500, bargeIn: true }),
+    agentTurn({ turnTakeOk: false, firstWordLatencyMs: null, turnLatencyMs: null }),
+    { ...agentTurn(), role: "caller", text: "my water heater is leaking" },
+  ];
+
+  const outcomes = [outcome({ correctedFields: { service_address: "88 Brickell Ave" } })];
+
+  it("computes the same numbers over turns whose text has been deleted", () => {
+    const before = computeMetrics({ calls, turns, outcomes, committedBookings: 2 });
+    const purged = turns.map((t) => ({ ...t, text: "" }));
+    const after = computeMetrics({ calls, turns: purged, outcomes, committedBookings: 2 });
+
+    expect(after).toEqual(before);
+  });
+});
