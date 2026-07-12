@@ -4,6 +4,7 @@ import {
   CallStateSchema,
   OutcomeClassificationSchema,
   OutcomeSourceSchema,
+  PublicationBasisSchema,
   SLOT_KEYS,
   UrgencySchema,
 } from "@ledgerline/contracts";
@@ -92,6 +93,56 @@ describe("job_snapshots", () => {
   });
 });
 
+describe("reliability_reports — the published figure (Step 9)", () => {
+  it("exists", () => {
+    expect(TABLE_NAMES).toContain("reliability_reports");
+  });
+
+  /**
+   * **The absent column, asserted.**
+   *
+   * Every other table holding anything is tenant-scoped, so a reader who notices this one
+   * is not will reach for the obvious fix — and adding a `tenant_id` here would break the
+   * public page (which has no tenant, and must not have one) while leaking nothing. That is
+   * the worst kind of change: it looks like a security improvement and is a bug. A
+   * published figure is an aggregate over *every* tenant, so it belongs to none of them.
+   *
+   * What keeps a contractor's identity out of it is `MIN_COHORT_TENANTS`, not RLS.
+   */
+  it("carries no tenant_id, and is not in TENANT_SCOPED_TABLES", () => {
+    expect(columnsOf(schema.reliabilityReports)).not.toContain("tenant_id");
+    expect([...schema.TENANT_SCOPED_TABLES]).not.toContain("reliability_reports");
+  });
+
+  it("records the methodology version, so no trend line crosses a definition change", () => {
+    // A correction rate is meaningless without the definition of what counts as a
+    // correction. Two figures computed under different versions measure different things.
+    expect(columnsOf(schema.reliabilityReports)).toContain("methodology_version");
+  });
+
+  it("records the interval and the worst tenant beside the headline rate", () => {
+    const columns = columnsOf(schema.reliabilityReports);
+
+    // A point estimate with no interval invites a precision the sample cannot support, and
+    // a pooled average with no worst case hides one contractor's disaster behind nine
+    // good ones. Both are stored because both are published.
+    expect(columns).toEqual(
+      expect.arrayContaining([
+        "correction_rate",
+        "correction_rate_low",
+        "correction_rate_high",
+        "worst_tenant_correction_rate",
+        "worst_tenant_bookings",
+        "observed_coverage",
+      ]),
+    );
+  });
+
+  it("names no tenant, not even the worst one", () => {
+    expect(columnsOf(schema.reliabilityReports)).not.toContain("worst_tenant_id");
+  });
+});
+
 describe("enums do not drift from the contracts", () => {
   /**
    * Every `pgEnum` is spread from a Zod schema rather than retyped. These assert
@@ -106,6 +157,7 @@ describe("enums do not drift from the contracts", () => {
     ["booking_status", schema.bookingStatusEnum, BookingStatusSchema.options],
     ["outcome_source", schema.outcomeSourceEnum, OutcomeSourceSchema.options],
     ["outcome_classification", schema.outcomeClassificationEnum, OutcomeClassificationSchema.options],
+    ["publication_basis", schema.publicationBasisEnum, PublicationBasisSchema.options],
   ])("%s matches its contract", (_name, pg, contract) => {
     expect(pg.enumValues).toEqual([...contract]);
   });

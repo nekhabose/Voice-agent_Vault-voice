@@ -16,4 +16,5 @@ export * from "./emergency.js";
 export * from "./booking.js";
 export * from "./call.js";
 export * from "./faq.js";
+export * from "./publication.js";
 export * from "./stores.js";

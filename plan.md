@@ -8,24 +8,25 @@
 
 ---
 
-## Current status (verified 2026-07-11, after Step 8's core)
+## Current status (verified 2026-07-12, after Step 9's core)
 
 The domain core is built and green, the call runtime that binds it to a voice
 session is tested end to end without a phone, the eval harness drives extraction
 through the *real* `SlotExtractor` port, the wedge has a *why* beside its *what*
 (correction triage, a human audit, and the rule that decides which number we are
-allowed to publish), Step 7 gave it a **database that actually runs** — and as of
-Step 8 the compliance rules are **code rather than a policy page**: an unknown area
-code cannot be recorded without notice, an outbound marketing text does not compile,
-and a caller's card number never reaches the model, the database, or the CRM.
-Everything below was re-run, not copied from a previous claim.
+allowed to publish), Step 7 gave it a **database that actually runs**, Step 8 made
+the compliance rules **code rather than a policy page** — and as of Step 9 the
+**publication mechanism exists and refuses to publish**: there are no contractors,
+so there is no number, and the page says exactly that rather than the 0% a broken
+measurement pipeline would report. Everything below was re-run, not copied from a
+previous claim.
 
 | Check | Result |
 |---|---|
-| `npm test` | **919 passed**, 33 files |
+| `npm test` | **976 passed**, 36 files |
 | `npm run typecheck` | clean |
-| `npm run test:coverage` | **99.36%** lines (thresholds: 90/90/85/90) |
-| `cd apps/web && npm run build` | builds, 7 routes |
+| `npm run test:coverage` | **99.39%** lines (thresholds: 90/90/85/90) |
+| `cd apps/web && npm run build` | builds, 10 routes |
 
 **Built.** `contracts`, `conversation` (SlotBook + the seven-state machine), `safety`
 (deterministic classifier, labeled corpus, `recall === 1.0`), `validators`, `extraction`
@@ -58,6 +59,15 @@ here from `utterance` because it is legal text rather than an utterance. `runtim
 `runRetention()`; `db` gains migration `0003` and `PgRetentionStore`; `apps/web` gains the
 third cron. `docs/COMPLIANCE.md` and `docs/DPA.md` are the pages, and every rule on them
 names the code that enforces it.
+
+Step 9 adds the **publication mechanism**, and it refuses to publish. `contracts` gains the
+report, the cohort, and the two ports; `telemetry` gains `decidePublication()` — four sample
+gates, a Wilson interval, and no branch that can read the rate; `db` gains migration `0004`,
+whose `SECURITY DEFINER` aggregate is the only cross-tenant read in the system and can return
+nothing but counts; `workflows` gains `runPublication()`; `apps/web` gains `/published`, a
+public JSON feed, and the fourth cron. `docs/RELIABILITY.md` is the methodology, written
+**before** the number. There are no contractors, so there is no number — and the page says
+that rather than the 0% a broken measurement pipeline would report.
 
 **Not built.** No telephony, no realtime model, no auth *provider*, and **no lawyer has read
 a word of the compliance work** (task 8.7 — the documents are written and the code enforces
@@ -103,16 +113,24 @@ person to open this file will trust it, and be wrong.
 | 6 | Correction triage + FAQ | 🟡 **Core built** — 2026-07-11 (live-model tail: 6.1's live run, 6.3's weekly ritual, 6.6's real embedder) |
 | 7 | Product — auth, tenancy, onboarding, billing | 🟡 **Core built** — 2026-07-11 (credential-gated tails: 7.5 onboarding/OAuth, 7.6 Clerk, 7.7 the live Neon) |
 | 8 | Compliance | 🟡 **Core built** — 2026-07-11 (8.6's live carrier deletion; **8.7, the lawyer's signature**) |
-| 9 | Publish the number | ⬜ Not started ← **next** |
+| 9 | Publish the number | 🟡 **Core built** — 2026-07-12 (the mechanism publishes; **the number needs a contractor** — 9.5) ← **next: the tails** |
 
 Not on the critical path, and unresolved: the `AgenticArm` A/B (§11), and
 `claude-haiku-4-5` vs `claude-sonnet-5` for extraction, scored on critical-slot accuracy.
 
-**Six questions no step so far could settle without a credential or a human.** Steps 1–7
+**Seven questions no step so far could settle without a credential or a human.** Steps 1–9
 each built the real code against the real interface and hand-authored the strings, because no
-vendor account existed. (Step 7 answered the *seventh* — "does the tenancy model actually hold"
-— because Postgres, alone among our vendors, will run in-process. The rest still wait on a key.)
-Named so they cannot be quietly forgotten:
+vendor account existed. (Step 7 answered the one question that *could* be settled — "does the
+tenancy model actually hold" — because Postgres, alone among our vendors, will run in-process.
+The rest still wait on a key, a lawyer, or a customer.) Named so they cannot be quietly
+forgotten:
+
+- **What the number actually is.** Every discipline that would make it trustworthy is now
+  code — the cohort is computed by a function that cannot leak a row, no gate can withhold a
+  figure for being embarrassing, the window cannot be gerrymandered, and a published figure
+  cannot be retracted. What does not exist is a contractor, a call, or a correction, so the
+  mechanism withholds and says why. **Task 9.5**, and it is the only item in this plan that
+  neither a credential nor a lawyer can supply: it needs a customer.
 
 - Whether the prompt-cache prefix is large enough to cache at all (§10.1) — **task 5.5**.
 - Whether the committed extraction fixtures match what `claude-sonnet-5` actually emits —
@@ -1348,11 +1366,147 @@ the Luhn/grouping guard, which eats a caller's phone number (1).
 
 ---
 
-### Step 9 — Publish the number
+### Step 9 — Publish the number 🟡 **Core built (2026-07-12); the number needs a contractor**
 
 Write up `correctionRate` across N tenants and M thousand calls, with the methodology and the
 human-audit agreement rate. `idea.md` §7 says nobody has this. Being first to publish it *is*
 the marketing — and it only works if the disciplines in §7 held.
+
+**This Step was described above as one that "cannot be *built*: it needs real tenants, real
+calls, and real corrections… what is missing is a contractor."** That is half true, and the
+half it gets wrong is the half with all the engineering in it. Everything Step 9 would
+*report* was indeed already computed. Nothing that would *publish* it existed — and the act of
+publishing turns out to have four hazards, three of which no earlier Step could have found,
+because they only appear the moment a number leaves the building.
+
+The deliverable is therefore the **mechanism and the methodology**, and its first act is to
+**refuse to publish**. There are no contractors, so there is no number, and `/published` says
+so in those words. That refusal is not a placeholder standing in for the real Step; it is the
+first thing this page has ever had to be right about.
+
+| # | Task | Detail | |
+|---|---|---|---|
+| 9.1 | The cross-tenant cohort | `app_reliability_cohort` — a `SECURITY DEFINER` function that sees every tenant's rows and **can only return counts** (migration `0004`), plus `CohortReader`/`PgCohortReader`. See surprise #1. | ✅ |
+| 9.2 | The publication decision | `decidePublication()` in `telemetry`. Four sample gates, a Wilson interval, the worst tenant beside the pooled average. **No gate can read the rate** — surprise #3. | ✅ |
+| 9.3 | An append-only ledger of figures | `reliability_reports`; `ReportStore` has no `update`/`delete` and the app role has no `UPDATE`/`DELETE` grant. A quarter we disliked cannot be withdrawn, only followed. | ✅ |
+| 9.4 | The public page, the feed, the cron | `/published` (renders the *live* decision, so a cron nobody ran cannot leave a stale figure looking current), `/api/reliability` (public JSON, built to be archived **by other people**), `/api/cron/publish` (quarterly, on the 15th — surprise #4). | ✅ |
+| 9.5 | **The number itself** | Needs three contractors, a thousand calls, and five hundred matured bookings. The gates are what say so, and they are the reason this row is not a lie. | ⬜ |
+| 9.6 | The write-up | `docs/RELIABILITY.md` — the methodology, published **before** the number, because a methodology published after the result is a methodology written to fit it. | ✅ |
+
+**Exit (met for the mechanism; the number is named as missing).** Eight mutations verified to
+fail the suite. What has never happened: a contractor, a call, and a correction.
+
+**Result:** 976 tests (was 919), 99.39% coverage, typecheck clean, `apps/web` builds (10
+routes, was 7).
+
+**Mutation-tested, all eight caught:** `SECURITY DEFINER` → `SECURITY INVOKER` (the aggregate
+sees nothing — 4 tests); counting immature bookings in the denominator (3); an unclassified
+correction becoming *not* our fault in the SQL (2); dropping the minimum-bookings gate, so an
+empty cohort publishes 0.0% (2); **adding a gate that withholds an embarrassing number** (3,
+one of which exists solely to say so); Wilson → the textbook normal approximation (3);
+granting `UPDATE`/`DELETE` on `reliability_reports` (2); dropping the idempotency guard, so a
+retried cron stacks two figures for one quarter in a table nothing can clean up (1).
+
+---
+
+#### Surprise #1 — the number we publish is the only one in the system that has no tenant
+
+Principle #6 says tenant isolation is a property of the database: every query runs inside
+`withTenant()`, row-level security filters every row to `app.tenant_id`, and **an unscoped
+connection sees nothing**. That is the guarantee the whole of Step 7 was built to earn.
+
+The published figure is an aggregate across *every* tenant. So it cannot be computed that way
+— and the obvious workaround is a catastrophe. Connect as the table owner and count: Postgres
+exempts an owner from RLS unless the table is FORCEd, and a superuser even then, so the one
+number we show the world would be the one produced by **the only connection in the system with
+no isolation at all**. `rls.test.ts` has a passing test proving that bypass exists, and it was
+written in Step 7 precisely so nobody would reach for it. Step 9 is the step where somebody
+would have.
+
+The second workaround is subtler and worse: loop `withTenant()` over every tenant and add the
+results up. That requires a *list of tenants* — which is a list somebody can shorten. **Picking
+the customers who make us look good is the most obvious way to cheat at this and the easiest
+one to hide**; a `tenantIds?: string[]` parameter with a comment saying "for testing" would
+read as reasonable in review forever.
+
+So: a `SECURITY DEFINER` function, owned by the migration runner, granted to `ledgerline_app`,
+whose **return type is a row of counts**. The app role gains the ability to compute the
+statistic and gains no ability to read a row it could not read a moment ago — there is a test
+for each half of that sentence, and flipping the function to `SECURITY INVOKER` fails four.
+`CohortReader.cohort()` takes a window and nothing else, so cherry-picking a subset would need
+a schema change, a migration, and a conversation.
+
+That is `Pick<CrmAdapter, "readJob">` and `TriageStore.classify` done in DDL: **the signature
+is the guarantee.**
+
+#### Surprise #2 — the newest bookings always flatter us, and the calendar would have done it for us
+
+A booking committed yesterday has not been re-read at 72h or 7d yet, so **no correction *can*
+have been observed on it**. Leaving it in the denominator dilutes the numerator with bookings
+that never had a chance to fail.
+
+The consequence is that a vendor who published monthly, from the first of the month, would
+report a number bent in their favour **by the calendar alone, and would never have to know they
+were doing it.** There is no bad actor in that story and no bug in any query. It is the
+missed-webhook failure mode (principle #5) arriving through arithmetic instead of through
+delivery, and it is the one that would have shipped, because the code that produces it is the
+code you would write.
+
+So a booking counts only once its full poll schedule has run. And because *that* exclusion is
+itself abusable — a CRM outage stops the polls, and the survivors publish a lovely number —
+`observedCoverage` is a **publication gate** rather than a footnote: below 95% we publish
+nothing and say we could not observe our own product.
+
+#### Surprise #3 — the load-bearing property is the one the code does *not* have
+
+Every other discipline in this repo is something the code does. This one is something it
+cannot do: **there is no branch in `decidePublication()` that reads the correction rate.**
+
+Every reason a figure can be withheld is a statement about the *sample* — too few tenants, too
+few calls, too few bookings, too much of the window unobserved — and each is printed beside the
+cohort it was measured over. There is no path from *this quarter is embarrassing* to
+`withheld`, and `publication.test.ts` asserts that a cohort in which the contractor corrected
+**every single booking we made** publishes 100%, on the front page.
+
+That test is the product. A vendor who retains the option to suppress a figure they dislike has
+published nothing, whatever their website says — and the only way to be believed is to have
+**deleted the option**, in code somebody else can read. Adding a gate that reads the rate fails
+three tests, one of which exists for no other purpose.
+
+The same argument settles two smaller questions. The **window is derived, never chosen**
+(`lastCompleteQuarter()`): a vendor who picks their reporting period has a free parameter worth
+more than any amount of spin, and *the trailing 37 days* catches a good streak in a way nobody
+could ever prove was deliberate. And a **published figure cannot be retracted** — no `UPDATE`,
+no `DELETE`, in the port *and* in the grant — so a bad quarter can only be followed by another
+quarter published beside it, and **the gaps in the history are visible on purpose.**
+
+#### Surprise #4 — a quarterly cron on the 1st would have withheld every quarter, forever
+
+The last bookings of a quarter are polled at 24h, 72h, and 7d. On the 1st of the following
+month they are still *immature*, so they are excluded from the rate, so `observedCoverage`
+craters, so the coverage gate refuses to publish — and the failure would have looked like a bug
+in the gates rather than a bug in the schedule. `vercel.json` fires on the **15th** of Jan, Apr,
+Jul, and Oct.
+
+Two smaller things fell out of the same corner. A cron that may be retried must not stack two
+figures for one quarter into a table with **no `UPDATE` and no `DELETE` grant** — a duplicate
+there could never be cleaned up, and would sit on the public page forever as two different
+answers to what our correction rate was. Hence a unique constraint on
+`(window_start, window_end, methodology_version)` and an idempotent `publish()`. And the public
+page computes the **live** decision on every request rather than rendering the last stored one,
+because otherwise a cron nobody ran leaves the previous quarter's figure looking current —
+which is how a vendor stops publishing without ever deciding to.
+
+#### What is deferred, and named
+
+**9.5 — the number.** It needs three contractors, a thousand calls, and five hundred matured
+bookings, and no amount of engineering substitutes for any of them. The gates are what say so,
+and today they say it out loud on the page.
+
+`apps/web`'s routes and the `/published` renderer are **not tested** — the same status the
+other three crons have carried since Step 7 ("eight lines of wiring apiece"). The *decision*
+they render is tested exhaustively; the JSX around it is not. And the published-figure branch
+of that page has never rendered against real data, because there is none.
 
 ---
 
@@ -1808,11 +1962,19 @@ bypass so that nobody mistakes the policies for the guarantee.
 portability makes an area code *evidence*, not a fact — so the conservative default is the
 design rather than a fallback, and the map is allowed to be wrong in exactly one direction.
 
-1. **Step 9 — publish the number.** ← you are here. And it is the first Step that cannot be
-   *built*: it needs real tenants, real calls, and real corrections. Everything it will report
-   is already computed — `correctionRate` raw, `agentErrorRate` beside it,
-   `publishedCorrectionRate()` deciding which one we are entitled to quote, and the human
-   audit's agreement rate licensing the classifier. What is missing is a contractor.
+~~Step 9 — publish the number.~~ Core built 2026-07-12. This Step was called the one that
+"cannot be *built*", and that was half wrong: everything it would *report* was already
+computed, but nothing that would *publish* it existed — and publishing has hazards of its own.
+Read surprise #1 before you touch `PgCohortReader`: **the published figure is the only
+quantity in this system with no tenant**, so the obvious way to compute it is as the table
+owner, which is the one connection with no isolation at all. And read surprise #3 before you
+touch `decidePublication()`: its load-bearing property is a branch it does **not** have.
+
+1. **The number itself — task 9.5.** ← you are here, and it is not an engineering task. It
+   needs three contractors, a thousand calls, and five hundred matured bookings. The mechanism
+   is built, tested against a real Postgres, and today it **refuses to publish** and says why,
+   which is the correct answer and will keep being the correct answer until somebody sells
+   this to a plumber.
 2. **The two signatures and the credentialed tails.** **8.7 — a lawyer reads the disclosure,
    `docs/COMPLIANCE.md`, and `docs/DPA.md`** — the only item in this plan that neither a
    credential nor a test can supply, and it gates revenue. Then: 4.2 (Twilio → SIP → LiveKit),
@@ -1826,9 +1988,10 @@ The uncertain parts are retired: the model integration (Step 1), the wedge compu
 the committed catalog (Step 3), the whole conversational control loop (Step 4's core), the
 extraction seam under the eval (Step 5's core), the triage pipeline and its publication rule
 (Step 6's core), tenant isolation — proven against a real Postgres rather than argued (Step 7's
-core), and the compliance rules, which are now code that cannot be violated rather than a page
-somebody could be found to have breached (Step 8's core). What is left is plumbing to hardware
-and credentials, a lawyer, and a contractor — not risk.
+core), the compliance rules, which are now code that cannot be violated rather than a page
+somebody could be found to have breached (Step 8's core), and the publication mechanism, which
+cannot be made to withhold a number for being bad (Step 9's core). What is left is plumbing to
+hardware and credentials, a lawyer, and a contractor — not risk.
 
 **Before you finish any step:** update the progress board at the top of this file and the
 step's own heading, in the same commit as the code. If you changed a boundary or a principle,

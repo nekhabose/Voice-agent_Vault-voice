@@ -117,6 +117,24 @@ export interface PublishedRate {
 }
 
 /**
+ * The four figures the licensing rule actually reads.
+ *
+ * Narrowed from `ReliabilityMetrics` in Step 9 so that the **cross-tenant** publication
+ * path (`decidePublication`, over a `CohortStats` that has no latency or containment in
+ * it) and the **per-tenant** dashboard path can share one copy of this decision. A second
+ * implementation of "may we quote the triaged rate" is a second implementation that can
+ * drift from the first, and the two would then disagree about what we told a contractor
+ * versus what we told the world.
+ *
+ * `ReliabilityMetrics` still satisfies it structurally, so every existing caller is
+ * unchanged.
+ */
+export type LicensableRates = Pick<
+  ReliabilityMetrics,
+  "correctionRate" | "agentErrorRate" | "auditedOutcomes" | "triageAgreementRate"
+>;
+
+/**
  * The number we are entitled to put in front of a contractor, and why.
  *
  * The triaged rate is *earned*, not assumed: it is used only while a human audit
@@ -129,7 +147,7 @@ export interface PublishedRate {
  * were not really our fault. This function is what we wrote down *before* that
  * day, and it is deliberately hard to argue with afterwards.
  */
-export function publishedCorrectionRate(metrics: ReliabilityMetrics): PublishedRate {
+export function publishedCorrectionRate(metrics: LicensableRates): PublishedRate {
   if (metrics.auditedOutcomes < MIN_AUDITED_OUTCOMES) {
     return {
       rate: metrics.correctionRate,

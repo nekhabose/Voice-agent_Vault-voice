@@ -106,11 +106,11 @@ packages/
   runtime/       CallRuntime. The Effect[] binding: caller ASR → machine → VoiceSession.
   workflows/     Saga engine + post-call booking transaction + the outcome poller + triage batch.
   billing/       Per booked job — and never for a booking we got wrong.
-  telemetry/     Reliability metrics + latency/turn-taking budgets + the publication rule.
+  telemetry/     Reliability metrics + latency/turn-taking budgets + the publication rule + what we may publish at all.
   db/            Drizzle schema + migrations + RLS + the tenant-scoped client + the Postgres stores.
   eval/          Simulated-caller harness. Scenarios run in CI, over the real SlotExtractor port.
 apps/
-  web/           Next.js dashboard, the reliability page, and the two crons.
+  web/           Next.js dashboard, the reliability page, the public number, and the four crons.
   agent/         Python LiveKit worker scaffold + generated Pydantic. No hardware yet (Step 4.2/4.6).
 ```
 
@@ -125,11 +125,11 @@ contracts ──► conversation ──► validators ──► eval
     ├──► faq ─────────────────────────────┄┄─────►  (runtime binds it in tests)
     ├──► triage ──────────────────────────┄┄─────►  (workflows binds it in tests)
     ├──► utterance ────────────────────┤            (runtime binds it in tests)
-    ├──► crm ──► workflows ┄┄► {telemetry, triage}  (┄ = test-only)
+    ├──► crm ──► workflows ┄┄► triage       (┄ = test-only)
     ├──► runtime ┄┄► {extraction, faq, utterance, telemetry}  (runtime deps: conversation, safety, validators, compliance)
     ├──► billing ──► web
-    ├──► telemetry ──► web
-    └──► db ──► web        (db ┄┄► faq: test-only, to prove both FaqIndex impls rank alike)
+    ├──► telemetry ──► {workflows, web}
+    └──► db ──► web        (db ┄┄► {faq, telemetry}: test-only)
 
 anthropic ──► {extraction, faq, triage}    (the SDK; depends on nothing of ours)
 ```
@@ -227,11 +227,24 @@ doubles, not contracts.
 the number, `workflows` decides what to send the model, and `billing` decides whether to *charge*.
 A disagreement between them invoices a contractor for a booking we publicly called our own error.
 
-`workflows ┄┄► {telemetry, triage}` are **devDependencies**. `outcomes.test.ts` drives a
-hand-edited job body through the real adapter, the real poller, and the real `computeMetrics()` —
-the one place the whole wedge is exercised end to end. `triage.test.ts` drives the real
-`runTriage()` against `FakeTriager`; the *real* `AnthropicTriager` is bound by the cron in Step 7,
-never by `workflows` itself. Do not promote either to a runtime dependency.
+**`workflows ──► telemetry` is a runtime dependency as of Step 9, and it used to be forbidden
+here.** The old rule said `telemetry` was test-only: `workflows` *emitted* the shapes telemetry
+consumed and never called it, so `outcomes.test.ts` could drive the real `computeMetrics()` while
+the graph stayed clean. `runPublication()` breaks that, on purpose — the batch that publishes the
+number must apply `decidePublication()`, the *same* rule the dashboard applies, and a second copy
+of "may we quote the triaged rate" is a second copy that drifts. Then we would have told a
+contractor one thing and the world another. Same argument that moved `isAgentError` into
+`contracts` in Step 7, arriving one layer up.
+
+`workflows ┄┄► triage` is still a **devDependency**. `triage.test.ts` drives the real `runTriage()`
+against `FakeTriager`; the *real* `AnthropicTriager` is bound by the cron, never by `workflows`
+itself. Do not promote it.
+
+`db ┄┄► telemetry` is **test-only**, and it is the second edge of its kind (`db ┄┄► faq` is the
+first). `cohort.test.ts` runs the SQL predicates for "corrected" and "our fault" against
+`contracts`' `isCorrected`/`isAgentError` **over the same rows**, and feeds the result to the real
+`decidePublication()`. A drift between the SQL and the TypeScript would publish one number and
+invoice for another. Do not promote it.
 
 `contracts` depends on nothing. Nothing depends on `web`. There are no cycles —
 keep it that way.
@@ -521,6 +534,55 @@ recording switch must be off.** Twilio records from the moment a call is answere
 those seconds precede the disclosure. It is a deployment fact — `docs/COMPLIANCE.md` §2 and
 `apps/agent/README.md` both say so in bold.
 
+### 9. Nothing in the publication path can withhold a number for being bad
+
+`packages/telemetry/src/publication.ts`, `packages/db/migrations/0004`, `docs/RELIABILITY.md`.
+
+Principle #5 says *measure*. This one says *publish*, and it is a different problem: the
+moment a number leaves the building, every incentive we have points at bending it, and none of
+principle #5's machinery stops us. So `decidePublication()` is built around a property it does
+**not** have.
+
+- **No gate reads the rate.** Every reason a figure can be withheld is a statement about the
+  *sample* — too few tenants, too few calls, too few bookings, too much of the window
+  unobserved — and each is printed beside the cohort it was measured over. There is no path
+  from *this quarter is embarrassing* to `withheld`, and a test asserts that a cohort in which
+  the contractor corrected **every booking we made** publishes 100%. A vendor who retains the
+  option to suppress a figure they dislike has published nothing, whatever their website says.
+- **An empty cohort is not a perfect score.** `ratio()` returns 0 on a 0 denominator, so a
+  company with no customers — or a poller broken for a month — reports a **flawless correction
+  rate** and is not technically lying. Publication is therefore a *decision*, not a number, and
+  below 3 tenants / 1,000 calls / 500 matured bookings it withholds and says why. This is the
+  missed-webhook failure mode (principle #5) in its most persuasive costume.
+- **The newest bookings always flatter us.** A booking committed yesterday has not been
+  re-read at 72h or 7d, so no correction *can* have been observed on it. It is excluded from
+  both sides of the ratio and counted as `immatureBookings` — and because that exclusion is
+  itself abusable (a CRM outage stops the polls, and the survivors publish a lovely number),
+  `observedCoverage` is a **gate**, not a footnote. A vendor publishing monthly from the 1st
+  would report a number bent in their favour *by the calendar alone* and never know it.
+- **The window is derived, never chosen.** `lastCompleteQuarter()`. A vendor who picks their
+  reporting period has a free parameter worth more than any amount of spin — *the trailing 37
+  days* catches a good streak in a way nobody could prove was deliberate. Same discipline as
+  hashing the booking id to pick the audit sample, applied to time.
+- **A pooled average is allowed to hide nobody.** Nine tenants at 2% and one at 40% pool to
+  5.8%, and the tenth — the only contractor for whom this product does not work — is
+  arithmetically invisible. The **worst tenant's rate** is published beside the average, with
+  the bookings it is over. No tenant id ever leaves the aggregate; `MIN_COHORT_TENANTS` is what
+  keeps the arithmetic itself from naming one.
+- **A published figure cannot be retracted.** `ReportStore` has no `update` and no `delete`
+  (the type), and the app role has neither grant (the privilege) — the same pair that protects
+  `outcomes.corrected_fields`. A quarter we disliked can only be *followed* by another quarter
+  published beside it, so **the gaps in the history are visible on purpose.**
+
+**And the cross-tenant read is the one place principle #6 could have been quietly undone.** The
+published figure is the only quantity in this system with no tenant, so it cannot be computed
+inside `withTenant()` — and the obvious workaround, *connect as the owner and count*, would make
+the one number we show the world the one produced by the only connection with no isolation at
+all. Instead it is a `SECURITY DEFINER` function that sees every tenant's rows and **can only
+return counts**; the app role calls it unscoped and still cannot read a row. `CohortReader.cohort()`
+takes a window and nothing else, so *cherry-picking the customers who make us look good* would
+need a schema change, a migration, and a conversation.
+
 ---
 
 ## Conventions
@@ -554,7 +616,7 @@ those seconds precede the disclosure. It is a deployment fact — `docs/COMPLIAN
 
 ## Testing
 
-919 tests, 99.36% line coverage, thresholds enforced in `vitest.config.ts`.
+976 tests, 99.39% line coverage, thresholds enforced in `vitest.config.ts`.
 
 | Layer | Where | What it proves |
 |---|---|---|
@@ -574,6 +636,8 @@ those seconds precede the disclosure. It is a deployment fact — `docs/COMPLIAN
 | **Retention** | `db`, `workflows`, `telemetry` | Against a real Postgres: the text is blanked and `first_word_latency_ms` / `barge_in` / `turn_take_ok` **survive**, so `computeMetrics()` produces byte-identical numbers over turns whose words are gone (pinned in `telemetry`). The app role **cannot `DELETE` a call** — retention has no choice but to redact — and **cannot `DELETE` an outcome**, so the deletion policy cannot shred the evidence behind the published number. A failed deletion is counted and *not* tombstoned; the deletion stays owed |
 | Integration | `workflows` | The booking saga, including the forced `create_job` failure and its compensating rollback. The outcome poller — a hand-edited job body through the real adapter, the real diff, and the real `computeMetrics()`. The nightly triage batch. And the cron: a CRM outage records nothing, consumes no poll, does not abort the batch, and the poll it owed is picked up by the next run |
 | The published number | `telemetry` | `agentErrorRate ≤ correctionRate`, always; an untriaged correction counts as our fault; the human overrules the model; and `publishedCorrectionRate()` refuses the classifier below 20 audited labels or 95% agreement |
+| **Publication** | `telemetry`, `db` | An empty cohort **withholds** rather than publishing 0%; every withholding reason names the *sample*, never the number; a **100% correction rate over an adequate sample publishes anyway**; the window is a calendar quarter and does not move; the Wilson interval satisfies the equation that defines it, rather than a constant somebody remembered |
+| **The cross-tenant read** | `db` | Against a real Postgres: the aggregate counts three tenants' bookings while the **same connection**, unscoped, reads *zero rows* of anybody's data. `SECURITY INVOKER` breaks it. The SQL for "corrected" and "our fault" is run against `contracts`' `isCorrected`/`isAgentError` **over the same rows** — a drift would publish one number and invoice for another. And a published figure cannot be `UPDATE`d, `DELETE`d, or double-inserted by a retried cron |
 | The invoice | `billing` | We do not bill for a cancelled booking, an agent error, or **a correction nobody has classified**. The human auditor can move money in either direction. And an identity: every booking `telemetry` counts as an agent error is a booking `billing` waived — they import the same predicate, and this asserts they cannot drift |
 | End-to-end | `eval` | Simulated callers through the real machine, classifier, validators, **and `SlotExtractor` port** — a fill scripts `FakeExtractor`, and the value flows text → port → validators → machine; the nightly `AnthropicExtractor` binding is driven offline through an injected `fetch` |
 
@@ -583,7 +647,7 @@ those seconds precede the disclosure. It is a deployment fact — `docs/COMPLIAN
   `readBacks` precisely because asserting the final *value* would also pass a
   system that silently kept a stale confirmation.
 - **Mutation-test the invariants that matter.** Break the thing, confirm the
-  suite screams, revert. Thirty-one are verified: revoking confirmation on
+  suite screams, revert. Thirty-nine are verified: revoking confirmation on
   correction (caught in 3 places); in-phrase fuzzy matching (drops recall to
   0.974); in `extraction`, dropping `thinking: {type:"disabled"}`, skipping the
   Zod re-validation of the model's output, interpolating a per-call value into
@@ -611,7 +675,16 @@ those seconds precede the disclosure. It is a deployment fact — `docs/COMPLIAN
   the **tombstone written before the media is deleted** (2), a **silent greeting still
   starting the tape** (1), moving `redactPan` to **after** the extractor so the caller's
   card reaches the model (2), and dropping the Luhn/grouping guard, which eats a caller's
-  **phone number** (1).
+  **phone number** (1); and, added in Step 9: flipping the cohort aggregate to
+  **`SECURITY INVOKER`**, so the published number is computed over nothing (4); counting
+  **immature bookings** in the denominator, the bug the calendar writes for you (3); an
+  **unclassified correction becoming *not* our fault in the SQL** (2); dropping the
+  minimum-bookings gate so an **empty cohort publishes 0.0%** (2); **adding a gate that
+  withholds an embarrassing number** (3, one of which exists for no other purpose);
+  Wilson → the **textbook normal approximation**, which claims certainty at a perfect
+  score (3); granting **`UPDATE`/`DELETE` on `reliability_reports`**, making a figure
+  retractable (2); and dropping the idempotency guard, so a **retried cron stacks two
+  figures for one quarter** into a table nothing can clean up (1).
   **`TriageStore.classify` writing `correctedFields` is not on this list because it
   is a type error, not a test failure** — which is the stronger guarantee. As of Step 7
   it is *also* a Postgres permission error, which holds for a raw `db.execute()`. **An
@@ -628,6 +701,21 @@ those seconds precede the disclosure. It is a deployment fact — `docs/COMPLIAN
 
 Stated plainly, because a README that implies otherwise is marketing.
 
+- **The number is not published, because there is no number.** This is the entry that
+  matters most, and it is the one a reader of `packages/telemetry` would be least likely to
+  guess. Step 9 built the whole publication mechanism — the cross-tenant aggregate, the
+  sample gates, the Wilson interval, the append-only ledger, the public page, the JSON feed,
+  the quarterly cron — and its first act is to **refuse**. There are no contractors, no
+  calls, and no corrections, so `/published` says *"We have not published a number yet…
+  Not a zero — nothing"*, and `/api/reliability` returns `{"status": "unmeasured"}`. **A 0%
+  correction rate over no bookings is what a broken measurement pipeline reports, and what a
+  dishonest vendor reports**, and the gates exist so that we cannot accidentally become
+  either. Task **9.5** needs a customer — not a credential, not a lawyer, and not more code.
+- **`apps/web`'s routes and the `/published` renderer are untested**, as the other three
+  crons have been since Step 7 ("eight lines of wiring apiece"). The *decisions* they render
+  are tested exhaustively in `telemetry` and `db`; the JSX around them is not, and the
+  published-figure branch of that page has never rendered against real data, because there
+  is none.
 - **The extractor has never spoken to a live model.** `packages/extraction` is
   real code against the real `@anthropic-ai/sdk`, but every test drives it through
   an injected `fetch` and committed fixtures, and **those fixtures were
@@ -884,10 +972,105 @@ Stated plainly, because a README that implies otherwise is marketing.
 - The `Recorder` port is **not** part of `VoiceSession`, and must not be folded into it. One
   worker implements both, but a `say()` that also started a recording would hide a compliance
   decision inside an audio one.
+- **`reliability_reports` has no `tenant_id`, and adding one is not a security fix.** Every
+  other table with data is tenant-scoped, so the missing column looks like an oversight. It is
+  an aggregate over *every* tenant, so it belongs to none of them — and a policy keyed on
+  `app_current_tenant()` would make the **public** page (which has no tenant, and must not
+  have one) unable to read the number we published about ourselves. `schema.test.ts` asserts
+  the absent column, because this is the change that looks like an improvement and is a bug.
+- **`PgCohortReader` takes no `tenantId`, and that is not a missing argument.** It is the only
+  store in `packages/db` without one. The two "fixes" are both catastrophes: connecting as the
+  owner reintroduces the RLS bypass `rls.test.ts` exists to warn about, and looping
+  `withTenant()` over a *list of tenants* introduces a list somebody can shorten. Flipping
+  `app_reliability_cohort` to `SECURITY INVOKER` fails four tests, which is what tells you the
+  function's privilege is the mechanism and not an accident.
+- **A `SECURITY DEFINER` function must pin `SET search_path`,** and `EXECUTE` on a new function
+  is granted to `PUBLIC` by default. Migration `0004` does both (`SET search_path = public`, then
+  `REVOKE ALL … FROM PUBLIC`). Without the first, name resolution runs with the *owner's*
+  privileges against a path the caller can influence; without the second, every role gets the
+  owner's reach.
+- **The publication cron fires on the 15th, not the 1st.** A quarter's last bookings are polled
+  at 24h/72h/7d, so on the 1st they are still immature — excluded from the rate, which craters
+  `observedCoverage`, which trips the coverage gate. A cron on the 1st would withhold every
+  quarter forever, and the failure would look like a bug in the gates rather than in the schedule.
+- **`decidePublication()` must never grow a branch that reads the rate.** That is the whole
+  property (principle #9), and it is the one a future "we should hold this back until we
+  understand the spike" would destroy in a single sympathetic-sounding commit. Three tests fail,
+  one of which exists for no other reason.
+- `PgReportStore.publish` is idempotent on `(window_start, window_end, methodology_version)`.
+  It has to be: the app role has no `UPDATE` and no `DELETE` on `reliability_reports`, so a
+  duplicate row written by a retried cron could **never be cleaned up** and would sit on the
+  public page forever as two different answers to what our correction rate was.
 
 ---
 
 ## Change log
+
+- **Step 9 (core) — the publication mechanism, and it refuses to publish.** *(976 tests, 99.39%
+  coverage, typecheck clean, `apps/web` builds — 10 routes.)* `plan.md` called this "the first
+  Step that cannot be *built*: it needs real tenants, real calls, and real corrections… what is
+  missing is a contractor." That is half true, and the half it gets wrong is the half with all
+  the engineering in it. Everything Step 9 would *report* was already computed. **Nothing that
+  would publish it existed** — and publishing turns out to have hazards that no earlier Step
+  could have found, because they only appear the moment a number leaves the building. So the
+  deliverable is the mechanism and the methodology (`docs/RELIABILITY.md`, written **before** the
+  number, because a methodology published after the result is one written to fit it), and its
+  first act is to say: *we have not published a number yet. Not a zero — nothing.*
+
+  **The published figure is the only quantity in this system with no tenant, and that nearly
+  undid principle #6.** Every other query runs inside `withTenant()` with row-level security
+  underneath; an unscoped connection sees *nothing*. A cross-tenant aggregate cannot be computed
+  that way — and the obvious workaround is a catastrophe. Connect as the table owner and count:
+  Postgres exempts an owner from RLS unless the table is FORCEd and a superuser even then, so the
+  one number we show the world would be produced by **the only connection in the system with no
+  isolation at all**. `rls.test.ts` has a passing test proving that bypass exists, written in
+  Step 7 precisely so nobody would reach for it; Step 9 is where somebody would have. The second
+  workaround is worse because it looks reasonable: loop `withTenant()` over every tenant and add
+  it up — which needs a *list of tenants*, which is a list somebody can shorten, and
+  **cherry-picking the customers who make us look good is the easiest cheat here to hide.** So
+  the cohort is a `SECURITY DEFINER` function that sees every tenant's rows and **can only return
+  counts**; the app role calls it unscoped and still reads zero rows (there is a test for each
+  half). `CohortReader.cohort()` takes a window and nothing else. The signature is the guarantee.
+
+  **The load-bearing property is a branch the code does not have.** Every other discipline in
+  this repo is something the code *does*; this one is something it *cannot* do. No gate in
+  `decidePublication()` reads the correction rate. Every reason a figure can be withheld is a
+  statement about the **sample** — too few tenants, too few calls, too few bookings, too much of
+  the window unobserved — and a test asserts that a cohort in which the contractor corrected
+  **every single booking we made** publishes 100%, on the front page. That test is the product: a
+  vendor who retains the option to suppress a figure they dislike has published nothing, whatever
+  their website says, and the only way to be believed is to have deleted the option in code
+  somebody else can read. The same argument settles two more: the **window is derived, never
+  chosen** (`lastCompleteQuarter()` — *the trailing 37 days* catches a good streak in a way
+  nobody could prove was deliberate), and a **published figure cannot be retracted** (no `UPDATE`,
+  no `DELETE`, in the port *and* the grant), so a bad quarter can only be followed by another
+  published beside it and **the gaps in the history are visible on purpose**.
+
+  **And two bugs that flatter us were sitting in plain arithmetic.** *(1)* `ratio()` returns 0 on
+  a 0 denominator, so an empty cohort reports a **flawless correction rate** — the
+  missed-webhook failure mode (principle #5) in its most persuasive costume, a perfect score, and
+  the state this company is actually in. *(2)* **The newest bookings always flatter us**: a
+  booking committed yesterday has not been re-read at 72h or 7d, so no correction *can* have been
+  observed on it, and leaving it in the denominator dilutes the numerator. A vendor publishing
+  monthly from the first of the month would report a number bent in their favour **by the calendar
+  alone, and would never have to know they were doing it.** There is no bad actor in that story
+  and no bug in any query. Immature bookings now leave both sides of the ratio, and because *that*
+  exclusion is itself abusable (a CRM outage stops the polls; the survivors publish a lovely
+  number), `observedCoverage` is a **gate** rather than a footnote.
+
+  **Two boundaries moved.** *(1)* `workflows → telemetry` is now a **runtime** dependency, and
+  this file previously forbade it: `runPublication()` must apply `decidePublication()`, the same
+  rule the dashboard applies, and a second copy of "may we quote the triaged rate" is a copy that
+  drifts — after which we would have told a contractor one thing and the world another. *(2)*
+  `db ┄┄► telemetry` (test-only) joins `db ┄┄► faq`: `cohort.test.ts` runs the SQL predicates for
+  "corrected" and "our fault" against `contracts`' `isCorrected`/`isAgentError` **over the same
+  rows**, because a drift between them would publish one number and invoice for another.
+
+  **What is deferred, and named:** **9.5 — the number.** Three contractors, a thousand calls, five
+  hundred matured bookings. It is the only item left in `plan.md` that neither a credential nor a
+  lawyer can supply: it needs a customer. `apps/web`'s routes and the `/published` renderer stay
+  untested, as the other three crons have been since Step 7, and the published-figure branch of
+  that page has never rendered against real data — because there is none.
 
 - **Step 8 (core) — compliance, as code rather than as a page.** *(919 tests, 99.36% coverage,
   typecheck clean, `apps/web` builds — 7 routes.)* `plan.md` called this the step that "gates

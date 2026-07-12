@@ -7,11 +7,13 @@ import {
   LocaleSchema,
   OutcomeClassificationSchema,
   OutcomeSourceSchema,
+  PublicationBasisSchema,
   SLOT_KEYS,
   UrgencySchema,
 } from "@ledgerline/contracts";
 import {
   boolean,
+  doublePrecision,
   foreignKey,
   index,
   integer,
@@ -90,6 +92,10 @@ export const escalationReasonEnum = pgEnum(
   variants(EscalationReasonSchema.options),
 );
 export const crmProviderEnum = pgEnum("crm_provider", ["housecall_pro", "jobber"]);
+export const publicationBasisEnum = pgEnum(
+  "publication_basis",
+  variants(PublicationBasisSchema.options),
+);
 
 /* -------------------------------------------------------------------------- */
 /* Tenant configuration                                                        */
@@ -530,6 +536,96 @@ export const faqEntries = pgTable(
 );
 
 /* -------------------------------------------------------------------------- */
+/* The published figure (Step 9)                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Every reliability figure we have ever published. **Append-only, and global.**
+ *
+ * ## Why it has no `tenant_id`, and is not in `TENANT_SCOPED_TABLES`
+ *
+ * It is the one table here that is nobody's data and everybody's. A published figure is an
+ * aggregate over *every* tenant, so scoping it to one would be a category error — and
+ * giving it an RLS policy keyed on `app_current_tenant()` would make it unreadable by the
+ * public page, which has no tenant and must not have one. It holds no contractor's rows,
+ * carries no id that could name one, and the floor in `MIN_COHORT_TENANTS` is what keeps
+ * the *arithmetic* from identifying one.
+ *
+ * `schema.test.ts` asserts the absent column, because a future reader who "fixes" the
+ * missing `tenant_id` would break the page and leak nothing — the worst kind of change,
+ * one that looks like a security improvement and is a bug.
+ *
+ * ## Why nothing can rewrite a row
+ *
+ * `ReportStore` has no `update` and no `delete` (the type), and migration `0004` grants
+ * the app role `SELECT` and `INSERT` and nothing else (the privilege) — the same pair of
+ * mechanisms that make `outcomes.corrected_fields` unrewritable. **A quarter we did not
+ * like cannot be withdrawn; it can only be followed by another quarter published beside
+ * it.** A reliability number a vendor can quietly retract is a marketing claim with a
+ * database behind it, and the gaps in this table's history are meant to be visible.
+ *
+ * `methodology_version` rides on every row because a rate is meaningless without the
+ * definition of what counts as a correction. Two figures computed under different versions
+ * are measurements of different things, and drawing a trend line through them would be a
+ * lie told with true numbers.
+ */
+export const reliabilityReports = pgTable(
+  "reliability_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    methodologyVersion: text("methodology_version").notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    windowEnd: timestamp("window_end", { withTimezone: true }).notNull(),
+    publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
+
+    tenants: integer("tenants").notNull(),
+    calls: integer("calls").notNull(),
+    committedBookings: integer("committed_bookings").notNull(),
+
+    /** The raw rate. Nothing is ever subtracted from it (principle #5). */
+    correctionRate: doublePrecision("correction_rate").notNull(),
+    /** The 95% Wilson bounds, stored so nobody has to recompute them to quote them. */
+    correctionRateLow: doublePrecision("correction_rate_low").notNull(),
+    correctionRateHigh: doublePrecision("correction_rate_high").notNull(),
+    agentErrorRate: doublePrecision("agent_error_rate").notNull(),
+
+    publishedRate: doublePrecision("published_rate").notNull(),
+    publishedBasis: publicationBasisEnum("published_basis").notNull(),
+    /** Why it is that rate and not the other one. A number without its basis is a claim without a method. */
+    publishedReason: text("published_reason").notNull(),
+
+    auditedOutcomes: integer("audited_outcomes").notNull(),
+    triageAgreementRate: doublePrecision("triage_agreement_rate").notNull(),
+
+    /** The worst single tenant, so the pooled average cannot hide them. No id — just the rate. */
+    worstTenantCorrectionRate: doublePrecision("worst_tenant_correction_rate").notNull(),
+    worstTenantBookings: integer("worst_tenant_bookings").notNull(),
+
+    /** Matured bookings ÷ all bookings committed in the window. A rate's hole, measured. */
+    observedCoverage: doublePrecision("observed_coverage").notNull(),
+  },
+  (table) => [
+    index("reliability_reports_window_idx").on(table.windowEnd),
+    /**
+     * One figure per window per methodology. **This is what makes an append-only table
+     * safe to write from a cron**: a retried invocation, or a schedule that fires monthly
+     * against a quarterly window, must not stack duplicate reports for the same period —
+     * and with no `UPDATE` and no `DELETE` grant, a duplicate could never be cleaned up.
+     *
+     * `methodology_version` is part of the key on purpose. If the definition of a
+     * correction changes, the same quarter may be **restated** under the new definitions —
+     * and the restatement is published *beside* the original, never over it. Both numbers
+     * stay visible, which is the only honest way to change how you count.
+     */
+    unique("reliability_reports_window_method_key").on(
+      table.windowStart,
+      table.windowEnd,
+      table.methodologyVersion,
+    ),
+  ],
+);
+
+/* -------------------------------------------------------------------------- */
 /* The tenancy manifest (Step 7)                                               */
 /* -------------------------------------------------------------------------- */
 
@@ -547,6 +643,13 @@ export const faqEntries = pgTable(
  * `tenants` is not here. It is the root, its policy is `id = current_tenant()`, and it
  * is checked separately — a tenant row scoped by a `tenant_id` column it does not have
  * would be a different bug.
+ *
+ * **`reliability_reports` is not here either, and that one is a decision rather than a
+ * special case** (Step 9). It is an aggregate over every tenant, so it belongs to none of
+ * them; it holds no `tenant_id`, and a policy keyed on `app_current_tenant()` would make
+ * the *public* page — which has no tenant, and must not have one — unable to read the
+ * number we published about ourselves. The thing standing between that table and a
+ * contractor's identity is `MIN_COHORT_TENANTS`, not RLS.
  */
 export const TENANT_SCOPED_TABLES = [
   "phone_numbers",

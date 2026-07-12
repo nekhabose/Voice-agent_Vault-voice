@@ -1,11 +1,15 @@
 import {
   BookingOutcomeSchema,
+  CohortStatsSchema,
   FAQ_EMBEDDING_DIMENSIONS,
   PendingBookingPayloadSchema,
+  ReliabilityReportSchema,
   type AuditStore,
   type BookingOutcome,
   type BookingStore,
   type ClassificationRecord,
+  type CohortReader,
+  type CohortStats,
   type DueBooking,
   type ExpiredRecording,
   type FaqIndex,
@@ -13,13 +17,15 @@ import {
   type IndexedFaqEntry,
   type JobSnapshotRecord,
   type OutcomeStore,
+  type ReliabilityReport,
+  type ReportStore,
   type RetentionStore,
   type RetrievedFaqEntry,
   type SnapshotStore,
   type TriageCase,
   type TriageStore,
 } from "@ledgerline/contracts";
-import { and, asc, eq, gte, isNotNull, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { Queryable } from "./client.js";
 import {
   bookings,
@@ -29,6 +35,7 @@ import {
   jobSnapshots,
   outcomes,
   pendingBookings,
+  reliabilityReports,
 } from "./schema.js";
 
 /**
@@ -446,6 +453,168 @@ export class PgRetentionStore implements RetentionStore {
       .update(calls)
       .set({ transcriptRedactedAt: at, transcriptUrl: null })
       .where(and(eq(calls.id, callId), eq(calls.tenantId, this.tenantId)));
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Publication — the only read in this file that is not one tenant's (Step 9)  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The cross-tenant cohort.
+ *
+ * **This is the only class in this package with no `tenantId` in its constructor**, and it
+ * is not an oversight — it is the design, in the one place the design is hardest. Every
+ * other store here is built inside `withTenant()` and reads one contractor's rows; the
+ * number we publish is an aggregate over all of them, and there is no tenant to scope it to.
+ *
+ * The tempting implementations are both wrong, and each is wrong in a way that would have
+ * shipped:
+ *
+ *  1. **Connect as the owner and count.** Postgres exempts the owner from RLS, so this
+ *     works immediately, passes every test, and makes the one figure we publish to the
+ *     world the one computed by the only connection in the system with no isolation
+ *     (principle #6, and the passing bypass test in `rls.test.ts` that exists to warn you).
+ *  2. **Loop `withTenant()` over every tenant and add up the results.** Which requires a
+ *     list of tenants, which is a list somebody can shorten. Cherry-picking the customers
+ *     who make us look good is the most obvious way to cheat at this and the easiest to
+ *     hide — and `CohortReader.cohort()` deliberately has no parameter that could express it.
+ *
+ * So the aggregate is a `SECURITY DEFINER` function (migration `0004`) that sees every
+ * tenant's rows and **can only return counts**. The app role calls it *unscoped* — no GUC,
+ * no `withTenant` — and still cannot read a single row of anyone's data. The return type is
+ * the guarantee, exactly as `Pick<CrmAdapter, "readJob">` is.
+ */
+export class PgCohortReader implements CohortReader {
+  constructor(private readonly db: Queryable) {}
+
+  async cohort(
+    windowStart: Date,
+    windowEnd: Date,
+    requiredPolls: number,
+  ): Promise<CohortStats> {
+    const result = await this.db.execute(
+      sql`SELECT * FROM app_reliability_cohort(${windowStart.toISOString()}::timestamptz, ${windowEnd.toISOString()}::timestamptz, ${requiredPolls}::integer)`,
+    );
+
+    const row = (result as unknown as { rows: readonly Record<string, unknown>[] }).rows[0];
+    if (row === undefined) {
+      // The function is `RETURNS TABLE` over aggregates, so it always yields exactly one
+      // row — even over an empty database. No row at all means the function is not the one
+      // we think it is, and a cohort silently defaulted to zeros would publish a *flawless*
+      // correction rate over no data. Throw rather than invent.
+      throw new Error("app_reliability_cohort returned no row");
+    }
+
+    // Postgres `bigint` arrives as a string over the wire (it does not fit a JS number
+    // safely, and the driver refuses to guess). `Number()` is right here and would not be
+    // for an id: these are counts of calls and bookings, orders of magnitude below 2^53.
+    const count = (value: unknown): number => Number(value ?? 0);
+
+    return CohortStatsSchema.parse({
+      windowStart: windowStart.toISOString(),
+      windowEnd: windowEnd.toISOString(),
+      tenants: count(row["tenants"]),
+      calls: count(row["calls"]),
+      committedBookings: count(row["committed_bookings"]),
+      immatureBookings: count(row["immature_bookings"]),
+      correctedBookings: count(row["corrected_bookings"]),
+      agentErrorBookings: count(row["agent_error_bookings"]),
+      auditedOutcomes: count(row["audited_outcomes"]),
+      agreedOutcomes: count(row["agreed_outcomes"]),
+      worstTenantCorrectionRate: count(row["worst_tenant_correction_rate"]),
+      worstTenantBookings: count(row["worst_tenant_bookings"]),
+    });
+  }
+}
+
+/**
+ * Where published figures go, and stay.
+ *
+ * No `update`, no `delete` — not in the port, and not in the grant (`0004` gives the app
+ * role `SELECT` and `INSERT` on this table and nothing else). The two mechanisms are the
+ * same pair that make `outcomes.corrected_fields` unrewritable, and they are here for the
+ * same reason: **a reliability figure a vendor can retract is a marketing claim with a
+ * database behind it.**
+ */
+export class PgReportStore implements ReportStore {
+  constructor(private readonly db: Queryable) {}
+
+  /**
+   * Idempotent on `(window_start, window_end, methodology_version)`.
+   *
+   * An append-only table written by a cron needs this: a retried invocation must not stack
+   * two figures for the same quarter, and with no `UPDATE` and no `DELETE` grant, a
+   * duplicate could never be cleaned up afterwards. `DO NOTHING` rather than `DO UPDATE`,
+   * because the first computation of a window is the one that was published — recomputing
+   * it later and quietly overwriting is the retraction this table exists to prevent.
+   */
+  async publish(report: ReliabilityReport): Promise<void> {
+    await this.db
+      .insert(reliabilityReports)
+      .values({
+        id: report.id,
+        methodologyVersion: report.methodologyVersion,
+        windowStart: new Date(report.windowStart),
+        windowEnd: new Date(report.windowEnd),
+        publishedAt: new Date(report.publishedAt),
+        tenants: report.tenants,
+        calls: report.calls,
+        committedBookings: report.committedBookings,
+        correctionRate: report.correctionRate,
+        correctionRateLow: report.correctionRateLow,
+        correctionRateHigh: report.correctionRateHigh,
+        agentErrorRate: report.agentErrorRate,
+        publishedRate: report.publishedRate,
+        publishedBasis: report.publishedBasis,
+        publishedReason: report.publishedReason,
+        auditedOutcomes: report.auditedOutcomes,
+        triageAgreementRate: report.triageAgreementRate,
+        worstTenantCorrectionRate: report.worstTenantCorrectionRate,
+        worstTenantBookings: report.worstTenantBookings,
+        observedCoverage: report.observedCoverage,
+      })
+      .onConflictDoNothing({
+        target: [
+          reliabilityReports.windowStart,
+          reliabilityReports.windowEnd,
+          reliabilityReports.methodologyVersion,
+        ],
+      });
+  }
+
+  /** Newest first. The gaps are visible on purpose — see `reliability_reports` in `schema.ts`. */
+  async history(limit: number): Promise<readonly ReliabilityReport[]> {
+    const rows = await this.db
+      .select()
+      .from(reliabilityReports)
+      .orderBy(desc(reliabilityReports.windowEnd))
+      .limit(limit);
+
+    return rows.map((row) =>
+      ReliabilityReportSchema.parse({
+        id: row.id,
+        methodologyVersion: row.methodologyVersion,
+        windowStart: row.windowStart.toISOString(),
+        windowEnd: row.windowEnd.toISOString(),
+        publishedAt: row.publishedAt.toISOString(),
+        tenants: row.tenants,
+        calls: row.calls,
+        committedBookings: row.committedBookings,
+        correctionRate: row.correctionRate,
+        correctionRateLow: row.correctionRateLow,
+        correctionRateHigh: row.correctionRateHigh,
+        agentErrorRate: row.agentErrorRate,
+        publishedRate: row.publishedRate,
+        publishedBasis: row.publishedBasis,
+        publishedReason: row.publishedReason,
+        auditedOutcomes: row.auditedOutcomes,
+        triageAgreementRate: row.triageAgreementRate,
+        worstTenantCorrectionRate: row.worstTenantCorrectionRate,
+        worstTenantBookings: row.worstTenantBookings,
+        observedCoverage: row.observedCoverage,
+      }),
+    );
   }
 }
 

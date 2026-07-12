@@ -24,8 +24,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 The reliability number is a top-level destination, not a tab inside a
                 settings page. "The reliability numbers as the pitch, not a tab" is a line
                 in the plan, and this is the whole of what it means in the navigation.
+
+                Two of them, and the distinction is the product. `/reliability` is *your*
+                number, behind auth, computed over your calls. `/published` is *ours*,
+                public, aggregated across every contractor — the figure `idea.md` §7 says
+                nobody in this industry reports. A vendor willing to show a customer their
+                own number and unwilling to show the world the pooled one has told you
+                which of the two they are afraid of.
               */}
               <a href="/reliability">Reliability</a>
+              <a href="/published">The number</a>
             </nav>
             <span className="tenant">{TENANT.name}</span>
           </header>
