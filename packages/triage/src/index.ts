@@ -10,3 +10,4 @@
 export * from "./fake.js";
 export * from "./fixtures.js";
 export * from "./triager.js";
+export * from "./groq-triager.js";

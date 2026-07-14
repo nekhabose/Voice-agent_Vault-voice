@@ -190,7 +190,21 @@ function interpret(key: SlotKey, message: Anthropic.Message): ExtractionOutcome 
     };
   }
 
-  const input = block.input;
+  return interpretSlotInput(key, block.input);
+}
+
+/**
+ * The `{value, confidence}` object the model filled, turned into an outcome.
+ *
+ * Vendor-independent on purpose, and **shared with `GroqExtractor`**. This is the
+ * function principle #3 lives in — the Zod re-validation that stands between a
+ * model's output and the geocoder — and a second copy of it behind a second
+ * vendor is a second place for `ABCDE` to become a ZIP code. The wire formats
+ * differ (an Anthropic `tool_use` block, a Groq `tool_calls[0].arguments` string,
+ * a Groq `json_schema` content body); what we do with the object inside them does
+ * not, and must not.
+ */
+export function interpretSlotInput(key: SlotKey, input: unknown): ExtractionOutcome {
   if (typeof input !== "object" || input === null) return { kind: "absent" };
 
   const { value, confidence } = input as { value?: unknown; confidence?: unknown };

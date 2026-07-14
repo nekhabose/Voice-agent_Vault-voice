@@ -238,7 +238,20 @@ function interpret(message: Anthropic.Message): TriageVerdict {
     };
   }
 
-  const input = block.input;
+  return interpretClassification(block.input);
+}
+
+/**
+ * The `{classification, rationale}` the model filled, turned into a verdict —
+ * vendor-independent, and **shared with `GroqTriager`**.
+ *
+ * Every rule the interested party is held to lives in this function: a label
+ * outside the enum is `declined`, a verdict with no rationale is `declined`, and
+ * `declined` counts against us. A second copy of it behind a second vendor is a
+ * second place for an unauditable exoneration to get through — and the whole
+ * design of this call site is that it cannot produce one.
+ */
+export function interpretClassification(input: unknown): TriageVerdict {
   if (typeof input !== "object" || input === null) {
     return { kind: "declined", reason: "no tool input" };
   }

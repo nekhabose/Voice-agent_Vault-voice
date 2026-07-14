@@ -97,8 +97,9 @@ packages/
   safety/        Deterministic emergency classifier. No LLM dependency.
   compliance/    The rules a lawyer reads, as code. Consent, the disclosure, PAN redaction, retention, TCPA.
   validators/    Phone, address (geocoder port + GoogleGeocoder), service area, business hours.
-  anthropic/     The vendor boundary: the outage taxonomy + the wire-level test transport. No prompts.
-  extraction/    The Anthropic slot extractor. One tool, one field, one turn.        (call site #2)
+  anthropic/     Vendor boundary #1: the outage taxonomy + the wire-level test transport. No prompts.
+  groq/          Vendor boundary #2: the same, plus the two structured-output modes and the third error kind.
+  extraction/    The slot extractor. One tool, one field, one turn. Two bindings.     (call site #2)
   faq/           Retrieval + selection. The model picks a committed answer, never writes one. (#3)
   triage/        The correction classifier. Was the contractor's edit our mistake?    (#5)
   utterance/     Everything the agent says. Committed catalog, decided before the call.
@@ -131,7 +132,8 @@ contracts ──► conversation ──► validators ──► eval
     ├──► telemetry ──► {workflows, web}
     └──► db ──► web        (db ┄┄► {faq, telemetry}: test-only)
 
-anthropic ──► {extraction, faq, triage}    (the SDK; depends on nothing of ours)
+anthropic ──► {extraction, faq, triage}    (SDK #1; depends on nothing of ours)
+groq      ──► {extraction, faq, triage}    (SDK #2; depends on nothing of ours)
 ```
 
 **`compliance` depends on `contracts` alone, and four packages depend on it.** It is the
@@ -149,18 +151,40 @@ be spoken, versioned beside `DPA_VERSION`, and the recording notice inside it is
 that lets us record at all. Same rule that moved `isCorrected` (Step 6) and the store ports
 (Step 7): a thing two packages must agree on belongs upstream of both.
 
-**Three packages speak to a model, and each depends on `contracts` alone (plus the SDK).**
+**Three packages speak to a model, and each depends on `contracts` alone (plus the SDKs).**
 `extraction` (call site #2), `faq` (#3), and `triage` (#5) each own their prompt, their tool, and
-their outcome type. Nothing else in the tree imports `@anthropic-ai/sdk`: `runtime` binds a
+their outcome type. Nothing else in the tree imports a model SDK: `runtime` binds a
 `SlotExtractor` and an `FaqAnswerer`, `workflows` binds a `CorrectionTriager`, and `utterance`'s
 `LlmUtterer` reaches a model through a local `Phraser` port. Ports down, implementations at the
 edge.
 
-`packages/anthropic` is the **vendor** boundary, not a call site: `isOutage`/`outageReasonOrThrow`
-(what a `429` means, versus a `400` that must crash) and `RecordingTransport`/`testClient`/`replay`
-(how a binding is proven with no credential). Both are properties of the API rather than of any one
+**Each call site now has two bindings, and that is what the ports were for.** `AnthropicExtractor`
+and `GroqExtractor` both implement `SlotExtractor`; `AnthropicFaqAnswerer`/`GroqFaqAnswerer` both
+implement `FaqAnswerer`; `AnthropicTriager`/`GroqTriager` both implement `CorrectionTriager`. The
+second binding of each is ~80 lines and **nothing above it changed** — `CallRuntime` cannot tell
+which extractor it has. What the two bindings of a call site *share* is everything that is ours: the
+frozen system prompt, the tool schema derived from `SLOT_SPECS[key].extraction`, and — critically —
+the interpretation. `interpretSlotInput` (extraction), `interpretSelection` (faq), and
+`interpretClassification` (triage) are each exported from the Anthropic file and imported by the
+Groq one. **Those three functions are where principles #3 and #5 live** — the Zod re-validation that
+keeps a ZIP of `ABCDE` away from the geocoder, the rule that an `entry_id` we never sent is
+`unknown`, and the rule that a verdict with no rationale is `declined`. A second copy of any of them
+behind a second vendor is a second place to lose it. Do not duplicate them; the wire formats differ
+and what we do with the object inside them must not.
+
+`packages/anthropic` and `packages/groq` are the **vendor** boundaries, not call sites. Each holds
+what a `429` means (versus a `400` that must crash) and how a binding is proven with no credential
+(`RecordingTransport`/`testClient`/`replay`). Both are properties of an API rather than of any one
 call site, and three private copies would drift silently — the same argument that moved
-`HttpTransport` into `contracts` in Step 4. It holds no prompts, no tools, and no domain types.
+`HttpTransport` into `contracts` in Step 4. Neither holds prompts, tools, or domain types.
+
+**`packages/groq` carries three things `packages/anthropic` does not need, and each is a real
+vendor difference** rather than an accident of who wrote it: a **third error category**
+(`tool_use_failed` — the *model* failed to fill the schema, which must neither throw nor be
+`absent`; see below), **two structured-output modes** (Groq's models each support exactly one of
+forced `tools` and `response_format: json_schema` and reject the other with a `400`), and a **client
+factory** (the SDK appends `/openai/v1` to the base URL, and the documented base URL already ends in
+it). All three are properties of the API. None of them leak upward.
 
 `eval` depends on `extraction` **at runtime**, as of Step 5.1 — the dependency diagram always
 anticipated it ("eval binds it as of Step 5.1"). `simulate.ts` drives the real `SlotExtractor`
@@ -303,9 +327,31 @@ wrong door.
 A geocoder outage yields `unavailable`, not `invalid`. Unverified is not wrong,
 and an outage at Google must not take the contractor's phone line down. The
 `always`-confirm policy is what protects us in that window.
-`ExtractionOutcome` mirrors this exactly: an Anthropic outage is `unavailable`,
+`ExtractionOutcome` mirrors this exactly: a model outage is `unavailable`,
 never `absent`, because "the model is down" and "the caller said nothing" must
 not produce the same behaviour.
+
+**And a model that cannot fill the schema is a third thing, which Groq forced us to
+name.** Anthropic's rule is binary: a `429`/`5xx`/dead socket degrades, a `400`/`401`
+is our bug and **throws**. Groq returns `400 tool_use_failed` when the *model* fails
+to produce the object it was forced into — the API rejects the generation and hands
+back the text the model actually wrote. Both of the obvious mappings are wrong:
+
+- **Throwing drops the call.** The caller is on the phone and has done nothing wrong.
+  A model that cannot operate a tool is a model-selection bug, and a model-selection
+  bug must not hang up on a homeowner with a burst pipe.
+- **`absent` is worse, and is the tempting one** — it is already the "caller didn't
+  say it" outcome and the call simply flows on. But it blames the caller for our
+  failure and makes our failure *invisible*: the slot is re-asked, the caller repeats
+  themselves, and nothing anywhere records that the model could not do the job. Every
+  failure mode of this system must push the published number **up** (principle #5).
+  This one would push it quietly down.
+
+So it is `unavailable`, with a reason prefixed `model_failure:` rather than `outage:`.
+The *behaviour* is right (retry once, then a human) and the *diagnosis* survives:
+`degradeReasonOrThrow` in `packages/groq` is the only place that distinguishes them,
+and an unrecognised `400` still throws, because a tool schema we broke must not wear
+the costume of a model having a bad day.
 
 **The model's output space is the contract, narrowed.** `SLOT_SPECS[key]` carries
 *two* schemas. `.schema` is the stored fact; `.extraction` is what the model may
@@ -616,7 +662,7 @@ need a schema change, a migration, and a conversation.
 
 ## Testing
 
-976 tests, 99.39% line coverage, thresholds enforced in `vitest.config.ts`.
+1,043 tests, ~99.3% line coverage, thresholds enforced in `vitest.config.ts`.
 
 | Layer | Where | What it proves |
 |---|---|---|
@@ -624,7 +670,9 @@ need a schema change, a migration, and a conversation.
 | Unit | `conversation`, `safety`, `validators` | Slot mechanics, hazard precision/recall, phone/address/window rules, and `GoogleGeocoder`'s status→outcome mapping against transcribed wire shapes |
 | **The strict side** | `compliance` | An area code we have never heard of is all-party; a withheld number is all-party; `ONE_PARTY` needs *both* ends known; a state with no statute is not a permissive one. A labeled PAN corpus in both directions, with one pinned deliberate false positive. A `404` from the archive is `already_absent` and a `500` throws. And the disclosure, pinned byte-for-byte, scored **verbatim** over real traces — a paraphrase fails the audit |
 | Review surface | `utterance` | The catalog is data, not template functions; every slot has an ask and a read-back; the AI disclosure is byte-for-byte what it was; `LlmUtterer` refuses to reword anything but `ASK_FOR` — including the FAQ answer |
-| Replay | `extraction`, `faq`, `triage` | Committed model responses driven through the **real** tool schemas and the real contracts. **Zero live model calls** anywhere — the SDK's `fetch` is injected (`@ledgerline/anthropic`). A suite whose green depends on a third party's uptime teaches the team to ignore red. Each asserts its cached prefix is byte-identical across two different inputs, and that a `400` throws while a `429` degrades |
+| Replay | `extraction`, `faq`, `triage` | Committed model responses driven through the **real** tool schemas and the real contracts, **on both vendors**. **Zero live model calls** anywhere — the SDK's `fetch` is injected (`@ledgerline/anthropic`, `@ledgerline/groq`). A suite whose green depends on a third party's uptime teaches the team to ignore red. Each asserts its cached prefix is byte-identical across two different inputs, and that a `400` throws while a `429` degrades |
+| **The third error kind** | `groq`, `extraction`, `faq`, `triage` | A `400 tool_use_failed` — the *model* could not fill the schema — **neither throws nor comes back `absent`**. One test per call site asserts each half, because throwing drops the caller and `absent` blames them for our bug. The reason string separates it from an outage; an unrecognised `400` still throws. And the base-URL normaliser, because the documented base URL 404s every call the SDK makes |
+| Two mechanisms, one schema | `groq`, `extraction` | The same slot, filled through forced `tools` *and* through `response_format: json_schema`, from **one** `strictify()`'d schema — Groq's models each reject the other with a `400`. `reasoning_effort` is off where the model allows it and `low` where it does not, which is `thinking: {type:"disabled"}` arriving at a vendor that will not let you turn it all the way off |
 | Selection, not generation | `faq` | The caller hears the contractor's committed answer verbatim; an `entry_id` the model invented comes back `unknown`; nothing above the floor means **no model call at all**; one tenant's answers never reach another's caller |
 | The interested party | `triage` + `workflows` | The classifier declines without a rationale, declines a label outside the enum, and cannot write to `correctedFields` (a type error). An outage and a decline both leave the correction counting against us, and neither aborts the batch |
 | Contract | `crm` | **One suite, both adapters.** If it passes for Housecall Pro and Jobber, the interface is not a rename of one vendor's endpoints. `readJob` is asserted in our vocabulary against each vendor's |
@@ -716,17 +764,25 @@ Stated plainly, because a README that implies otherwise is marketing.
   are tested exhaustively in `telemetry` and `db`; the JSX around them is not, and the
   published-figure branch of that page has never rendered against real data, because there
   is none.
-- **The extractor has never spoken to a live model.** `packages/extraction` is
-  real code against the real `@anthropic-ai/sdk`, but every test drives it through
-  an injected `fetch` and committed fixtures, and **those fixtures were
-  hand-authored, not recorded** — no credential existed when it was built
-  (`fixtures.ts` says so at the top). Re-record them at the start of Step 5.
-  Two things nobody has verified: what `claude-sonnet-5` actually emits, and
-  whether the prompt-cache prefix is even large enough to cache (it is a few
-  hundred tokens against a Sonnet-tier minimum near 2k, and a short prefix caches
-  *silently*). See `plan.md` Step 1, surprises #4 and #5, and Step 5.5 — the
-  nightly arm that would settle both is bound (`eval/src/extractors.ts`) but has
-  never called a live model, because no credential exists here.
+- **The Anthropic extractor has never spoken to a live model; the Groq one has, and it
+  failed.** `packages/extraction` holds two bindings. The Anthropic one is real code against
+  the real SDK, but every test drives it through an injected `fetch` and committed fixtures,
+  and **those fixtures were hand-authored, not recorded** — no Anthropic credential exists
+  here (`fixtures.ts` says so at the top). Two things nobody has verified: what
+  `claude-sonnet-5` actually emits, and whether the prompt-cache prefix is even large enough
+  to cache (a few hundred tokens against a Sonnet-tier minimum near 2k, and a short prefix
+  caches *silently*).
+
+  The Groq binding is different, and its one live datum is the most useful thing in this file.
+  **`openai/gpt-oss-120b`, handed `record_service_address` and "1247 Calle Ocho, Miami FL
+  33135", returned `{"value": {"address": "1247 Calle Ocho, Miami Florida, 33135"}}`** — it
+  flattened a four-field address into a single string, failed the schema, and the API turned
+  that into a `400 tool_use_failed`. On turn one. That is VoiceAgentBench's 60.6%
+  parameter-fill finding reproducing live on the first call this repository ever made, and it
+  is *why* principle #1 exists. What we still do not have is a **score**: nobody has run the
+  eval's scenarios through a live model and counted critical-slot accuracy, so we do not know
+  whether llama-3.3-70b is 95% or 70% on our slots. That number is task 5.5, it is the whole
+  point of the wedge, and it is now unblocked by a credential that exists.
 - **`eval` now binds the real `SlotExtractor` port** (Step 5.1), but only the fake
   side runs. The PR suite drives `FakeExtractor` scripted from each scenario's
   fills; the nightly `AnthropicExtractor` binding is proven offline through an
@@ -919,6 +975,34 @@ Stated plainly, because a README that implies otherwise is marketing.
 - `packages/anthropic` holds `isOutage`/`outageReasonOrThrow` and the test transport, and
   **nothing else**. Do not put a prompt, a tool, or a domain type in it: the moment it
   knows about slots, it stops being the vendor boundary and becomes a second `contracts`.
+  `packages/groq` is held to the same rule.
+- **`GROQ_BASE_URL` must be `https://api.groq.com`, not `https://api.groq.com/openai/v1`** —
+  and the second is the one printed on every page of Groq's documentation. `groq-sdk` builds
+  every path as `${baseURL}/openai/v1/chat/completions`, so the documented value double-appends
+  and **every** SDK call comes back `404 unknown_url` while a raw `fetch` to the same endpoint
+  works fine. Worse, the SDK reads `GROQ_BASE_URL` from the environment on its own when you do
+  not pass one, so a `.env` written the documented way poisons a client that never mentioned a
+  base URL. `groqClient()` always passes an explicit normalised value and `normalizeBaseUrl()`
+  is idempotent — either form works. Do not "simplify" it away.
+- **A Groq `400` is not automatically our bug**, and this is the one place the Anthropic rule
+  does not carry over. `tool_use_failed` / `json_validate_failed` mean the *model* could not
+  fill the schema: they degrade to `unavailable` (prefix `model_failure:`), because throwing
+  hangs up on the caller and `absent` blames them for our failure and hides it from the
+  published number. Every *other* `400` still throws. See principle #3.
+- **`modeFor(model)` is not a preference, it is a compatibility matrix.** Groq's models each
+  support exactly one of forced `tools` and `response_format: json_schema` and return a `400`
+  for the other — measured: `openai/gpt-oss-*` needs `json_schema`, llama/qwen need `tools`.
+  Hard-coding either mechanism silently rules out half the catalogue.
+- **Groq has no prompt caching.** There is no `cache_control` breakpoint API, so there is no
+  prefix to pin, no `prewarm()`, and no cache-hit rate — which is why `GroqExtractor` has no
+  `prewarm()` method rather than a no-op one, and why `GroqExtractionUsage` has no
+  `cacheReadInputTokens`. **The §10.5 cost model is derived from Anthropic's caching and does
+  not survive the move**; it must be re-derived before anyone quotes a per-call cost. The
+  "nothing in the cached prompt prefix may vary per call" convention still holds for the
+  Anthropic bindings and is simply inert for the Groq ones.
+- **Groq serves no embedding models.** Task 6.6 (a real `Embedder`, and calibrating
+  `SIMILARITY_FLOOR` against something with semantics) therefore still needs a *third* vendor.
+  A Groq key does not unblock the FAQ.
 - **`DATABASE_URL` must name `ledgerline_app`, not Neon's default role.** The default is the
   table owner, and Postgres exempts an owner from RLS unless the table is FORCEd — and a
   *superuser* even then. Connect as it and every policy is decoration. See principle #6;
@@ -1005,6 +1089,59 @@ Stated plainly, because a README that implies otherwise is marketing.
 ---
 
 ## Change log
+
+- **`packages/groq` — the second vendor, and the first live model call this repo has ever
+  made.** *(1,043 tests, typecheck clean.)* A Groq credential arrived, so the three model call
+  sites each got a second binding: `GroqExtractor`, `GroqFaqAnswerer`, `GroqTriager`. **The
+  bill for four Steps of port discipline came to about eighty lines apiece, and nothing above
+  them changed** — `CallRuntime` binds a `SlotExtractor` and still cannot tell which one it
+  has. That is the whole return on `Effect`, `SlotExtractor`, and the vendor boundary, collected
+  in one afternoon. What the two bindings of a call site *share* is everything that is ours: the
+  frozen prompt, the tool derived from `SLOT_SPECS[key].extraction`, and the **interpretation** —
+  `interpretSlotInput`, `interpretSelection`, `interpretClassification` are exported from the
+  Anthropic file and imported by the Groq one, because those three functions are where
+  principles #3 and #5 actually live and a second copy behind a second vendor is a second place
+  to lose them.
+
+  **The first live call reproduced VoiceAgentBench on turn one.** `openai/gpt-oss-120b`, handed
+  our `record_service_address` tool and "1247 Calle Ocho, Miami FL 33135", returned
+  `{"value": {"address": "1247 Calle Ocho, Miami Florida, 33135"}}` — four fields flattened into
+  one string. Not a hard utterance. Not an edge case. The single most-benchmarked failure in the
+  literature, on the first request, and the reason principle #1 exists — except that until this
+  week it was a *citation* and now it is a fixture.
+
+  **Which forced a third error category, and the taxonomy question turned out to be a trap with
+  a comfortable wrong answer.** Groq rejects the *generation* rather than returning a bad tool
+  call: `400 tool_use_failed`. Anthropic's rule (a `400` is our bug, and throws) would **hang up
+  on the caller**. The tempting alternative is `absent` — it is already the "caller didn't say
+  it" outcome, the call flows on, nothing looks broken. And that is exactly why it is the worse
+  option: it blames the caller for our failure and makes our failure **invisible**, which is the
+  missed-webhook failure mode (principle #5) in yet another costume — a metric whose failure mode
+  is *looks perfect*. So it degrades to `unavailable` with a `model_failure:` prefix: the
+  behaviour is an outage's (retry, then a human), the diagnosis survives, and an unrecognised
+  `400` still throws.
+
+  **Two vendor facts that no amount of reading the docs would have produced.** *(1)* Groq's
+  structured-output mechanisms are **mutually exclusive per model**: forced `tools` works on
+  llama and qwen and `400`s on gpt-oss; `response_format: json_schema` is the exact inverse.
+  Hard-coding either rules out half the catalogue, so `modeFor()` is a compatibility matrix and
+  both modes are built from one `strictify()`'d schema — which means the A/B in §11 is a thing we
+  can *run* rather than a decision we had to make blind. *(2)* `groq-sdk` appends `/openai/v1` to
+  the base URL, and the base URL in Groq's own documentation **already ends in `/openai/v1`**, so
+  the documented configuration 404s every SDK call while a raw `fetch` works — and the SDK reads
+  `GROQ_BASE_URL` from the environment on its own, so it poisons clients that never mentioned it.
+
+  **And `strictify()` was free.** Written for Anthropic's `strict` tool use, it emits exactly the
+  subset Groq accepts in *both* of its modes, because both are the same OpenAI-derived subset.
+  One function, three mechanisms, two vendors.
+
+  **What did not survive the move, and is named rather than quietly dropped:** Groq has **no
+  prompt caching** — no `cache_control`, no prefix to pin, no `prewarm()`, no cache-hit rate — so
+  **the §10.5 cost model is invalid on this vendor and must be re-derived** before anyone quotes
+  a per-call price. `GroqExtractor` therefore has no `prewarm()` rather than a no-op one: a
+  no-op method named `prewarm` is a promise the next person will believe. And Groq serves **no
+  embedding models at all**, so task 6.6 still needs a *third* vendor — a Groq key does not
+  unblock the FAQ.
 
 - **Step 9 (core) — the publication mechanism, and it refuses to publish.** *(976 tests, 99.39%
   coverage, typecheck clean, `apps/web` builds — 10 routes.)* `plan.md` called this "the first

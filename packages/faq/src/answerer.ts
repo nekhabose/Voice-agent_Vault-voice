@@ -185,7 +185,7 @@ export class AnthropicFaqAnswerer implements FaqAnswerer {
  * unanswerable from the questions alone — two entries can share a question and
  * differ in whether they cover after-hours.
  */
-function promptFor(question: string, candidates: readonly FaqEntry[]): string {
+export function promptFor(question: string, candidates: readonly FaqEntry[]): string {
   const lines = candidates.map(
     (entry) => `id: ${entry.id}\nquestion: ${entry.question}\nanswer: ${entry.answer}`,
   );
@@ -219,7 +219,23 @@ function interpret(
     };
   }
 
-  const input = block.input;
+  return interpretSelection(block.input, candidates);
+}
+
+/**
+ * The `{entry_id}` the model chose, turned into an outcome — vendor-independent,
+ * and **shared with `GroqFaqAnswerer`**.
+ *
+ * The rule it enforces is the whole reason this call site exists: an id we never
+ * sent is `unknown`. A model that returns an entry id nobody wrote is a model
+ * *writing an answer*, which is the one thing a retrieval-and-select design is
+ * built to make impossible — and a second copy of this check behind a second
+ * vendor is a second chance to lose it.
+ */
+export function interpretSelection(
+  input: unknown,
+  candidates: readonly FaqEntry[],
+): FaqOutcome {
   if (typeof input !== "object" || input === null) return { kind: "unknown" };
 
   const { entry_id: entryId } = input as { entry_id?: unknown };
