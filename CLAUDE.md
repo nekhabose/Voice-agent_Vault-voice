@@ -886,14 +886,19 @@ Stated plainly, because a README that implies otherwise is marketing.
 - **`LlmUtterer` has no bound `Phraser`.** Nothing in the tree implements one;
   it is a drafting tool waiting for a credential, and `CachedUtterer` is what
   every code path actually uses.
-- **A real database, and no Neon.** This is the one entry that improved in kind rather
-  than degree. `packages/db` now has a client, RLS, and the Postgres stores, and all three
-  migrations are **applied to an actual Postgres in the PR suite** — PGlite, in-process, no
-  credential — so tenant isolation, the composite FKs, the column grants, and `pgvector`'s
-  cosine ranking are *proven* rather than asserted. What is unproven is one `Pool` and a
-  URL: `neonDatabase()` has never connected to a live Neon (task 7.7), and it is the only
-  thing in `packages/db` that has not met a real Postgres. `apps/web/lib/demo-data.ts` still
-  seeds the dashboard and is typed against the real contracts, so the UI cannot drift.
+- **The database is real now, and the RLS is proven on it.** *(Task 7.7 — done.)*
+  `scripts/migrate-neon.ts` applied all five migrations to a live Neon and verified, **against
+  that database**: 14 tables with RLS `ENABLE`d *and* `FORCE`d, 14 policies, the cross-tenant
+  aggregate is `SECURITY DEFINER`, and `ledgerline_app` connects, **reads zero rows unscoped**,
+  and is refused DDL. Migration `0002` creates that role `NOLOGIN` on purpose — a migration that
+  sets a password is a password in a git repository — so the script mints it and writes the URL
+  to a gitignored `.env.ledgerline_app`.
+
+  **The one remaining manual step is the one that decides whether any of it applies.**
+  `DATABASE_URL` must be swapped from Neon's default (the table *owner*, which Postgres exempts
+  from RLS) to the `ledgerline_app` URL. Until that swap happens, every policy above is
+  decoration and no test anywhere will tell you. `apps/web/lib/demo-data.ts` still seeds the
+  dashboard, because no real call has ever been made.
 - **No auth provider.** The seam is built — `TenantResolver`, and every route funnels
   through it into `withTenant()` — but nothing binds Clerk, because no key exists (task
   7.6). `envTenantResolver` names one tenant from the server's own environment, and

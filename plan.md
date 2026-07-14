@@ -23,9 +23,9 @@ previous claim.
 
 | Check | Result |
 |---|---|
-| `npm test` | **976 passed**, 36 files |
+| `npm test` | **1,047 passed**, 41 files |
 | `npm run typecheck` | clean |
-| `npm run test:coverage` | **99.39%** lines (thresholds: 90/90/85/90) |
+| `npm run test:coverage` | ~**99.3%** lines (thresholds: 90/90/85/90) |
 | `cd apps/web && npm run build` | builds, 10 routes |
 
 **Built.** `contracts`, `conversation` (SlotBook + the seven-state machine), `safety`
@@ -111,7 +111,7 @@ person to open this file will trust it, and be wrong.
 | 4 | `apps/agent` — one live call | 🟡 **Core built** — 2026-07-10 (live-call gate deferred: 4.2/4.6/4.10) |
 | 5 | Eval over the real path | 🟡 **Core built** — 2026-07-10 (nightly/SIP arms deferred: 5.2/5.3/5.5) |
 | 6 | Correction triage + FAQ | 🟡 **Core built** — 2026-07-11 (live-model tail: 6.1's live run, 6.3's weekly ritual, 6.6's real embedder) |
-| 7 | Product — auth, tenancy, onboarding, billing | 🟡 **Core built** — 2026-07-11 (credential-gated tails: 7.5 onboarding/OAuth, 7.6 Clerk, 7.7 the live Neon) |
+| 7 | Product — auth, tenancy, onboarding, billing | 🟡 **Core built** — 2026-07-11 (**7.7 live Neon ✅ 2026-07-14**; credential-gated tails: 7.5 onboarding/OAuth, 7.6 Clerk) |
 | 8 | Compliance | 🟡 **Core built** — 2026-07-11 (8.6's live carrier deletion; **8.7, the lawyer's signature**) |
 | 9 | Publish the number | 🟡 **Core built** — 2026-07-12 (the mechanism publishes; **the number needs a contractor** — 9.5) ← **next: the tails** |
 
@@ -1113,7 +1113,7 @@ developer account, a Twilio number, and a Neon URL.
 | 7.4 | Billing per booked job | `packages/billing`. And the rule that makes the wedge survivable: **we do not bill for a booking we got wrong** — including one nobody has classified yet. See surprise #4. | ✅ |
 | 7.5 | Onboarding: Housecall Pro OAuth, service area, hours, job types, greeting | The *provider* is already a column and `crmForTenant()` switches on it, so a Jobber shop and a Housecall Pro shop poll through the same code. The credential is the gap: no developer account, so no OAuth flow, so `crm_credentials_enc` holds a sentinel and `crmForTenant()` **refuses** rather than falling back to another tenant's token. | ⬜ |
 | 7.6 | Clerk auth | The seam is built (`TenantResolver`), and every route funnels through it into `withTenant()`. The binding is eight lines and needs a key. Isolation does not depend on it: it lives in the database, so swapping the identity provider changes one file and nothing below it. | ⬜ |
-| 7.7 | A live Neon instance | `neonDatabase()` ships and has never connected. It is the only thing in `packages/db` that has not met a real Postgres. Applying the migrations to a real Neon also unblocks **6.6** (a real embedder, and `SIMILARITY_FLOOR` calibrated against something) and **4.10** (the live CRM sandbox). | ⬜ |
+| 7.7 | A live Neon instance | ✅ **Done — 2026-07-14.** `scripts/migrate-neon.ts` applied all five migrations to a live Neon as the owner, minted `ledgerline_app` with `LOGIN` (migration `0002` creates it `NOLOGIN`, because a migration that sets a password is a password in a git repository), and verified **on the live database**: 14 tables RLS `ENABLE`d *and* `FORCE`d, 14 policies, `app_reliability_cohort` is `SECURITY DEFINER`, the app role connects, **reads zero rows unscoped**, and is refused DDL. The app-role URL is written to a gitignored `.env.ledgerline_app`; swapping `DATABASE_URL` to it is the one manual step, and it is the step that decides whether RLS applies at all. | ✅ |
 
 **Exit (met for the core, and the gap is named).** Tenant isolation is proven — not asserted —
 against a real Postgres: one contractor cannot read another's calls, cannot write into another's
