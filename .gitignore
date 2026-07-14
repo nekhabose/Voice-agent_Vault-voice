@@ -6,3 +6,6 @@ coverage/
 .env
 .env.local
 .DS_Store
+
+# Written by scripts/migrate-neon.ts — a live credential. Never commit.
+.env.ledgerline_app

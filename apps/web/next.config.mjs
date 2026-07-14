@@ -9,6 +9,7 @@ const nextConfig = {
     "@ledgerline/conversation",
     "@ledgerline/crm",
     "@ledgerline/db",
+    "@ledgerline/groq",
     "@ledgerline/telemetry",
     "@ledgerline/triage",
     "@ledgerline/workflows",

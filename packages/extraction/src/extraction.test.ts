@@ -23,7 +23,9 @@ import { FakeExtractor, absent, filled, unavailable } from "./fake.js";
 import * as fx from "./fixtures.js";
 import { strictify, stripNulls, toolFor, toolNameFor } from "./tool.js";
 
-const CTX: ExtractionContext = { callId: "call_01", turnIndex: 0 };
+const EVAL_NOW = "2026-07-08T12:00:00.000Z";
+
+const CTX: ExtractionContext = { callId: "call_01", turnIndex: 0, now: EVAL_NOW, timeZone: "America/New_York" };
 
 function extractorOn(handler: Handler) {
   const transport = new RecordingTransport(handler);
@@ -83,7 +85,7 @@ describe("toolFor", () => {
     expect(JSON.stringify(value)).not.toContain("\\\\+[1-9]");
   });
 
-  it("moves the contract's optional fields to nullable-and-required", () => {
+  it("moves the contract's optional fields to nullable-and-required, keeping the description", () => {
     const value = toolFor("service_address").input_schema.properties["value"] as {
       anyOf: [{ required: string[]; properties: Record<string, unknown> }, unknown];
     };
@@ -93,7 +95,57 @@ describe("toolFor", () => {
     );
     expect(object.properties["line2"]).toEqual({
       anyOf: [{ type: "string" }, { type: "null" }],
+      // The description survives the nullable rewrite, and that is now
+      // load-bearing rather than incidental — see below.
+      description: expect.stringContaining("Null if the caller did not give one"),
     });
+  });
+
+  /**
+   * The bug a live model found, and the reason `primitives.ts` is full of
+   * `.describe()` calls.
+   *
+   * `strictify()` deletes `pattern`, `minLength`, and `length` — strict mode cannot
+   * express them. That is safe, because Zod re-validates on the way in. It is *not*
+   * sufficient: a model that is never shown a constraint cannot satisfy it, and a
+   * slot whose constraint the model cannot satisfy **never fills**.
+   *
+   * `state: z.string().length(2)` reached `llama-3.3-70b` as `{"type": "string"}`.
+   * Asked for the address in "1247 Calle Ocho, Miami Florida, 33135" it answered
+   * `"Florida"` — right, and rejected, and therefore `absent`, and therefore asked
+   * again, forever, until the caller was escalated to a human. Nine Steps of green
+   * tests never caught it, because `FakeExtractor` was scripted with `"FL"`.
+   */
+  it("tells the model every constraint strict mode made it strip", () => {
+    const value = toolFor("service_address").input_schema.properties["value"] as {
+      anyOf: [{ properties: Record<string, { description?: string }> }, unknown];
+    };
+    const fields = value.anyOf[0].properties;
+
+    // The exact constraint `length(2)` used to carry, and could not survive.
+    expect(fields["state"]?.description).toMatch(/two-letter/i);
+    expect(fields["state"]?.description).toMatch(/\bFL\b/);
+    // The exact constraint the ZIP `pattern` used to carry.
+    expect(fields["postalCode"]?.description).toMatch(/five-digit/i);
+
+    // And the whole schema really is stripped of the machine-readable versions,
+    // which is what makes the descriptions the only channel left.
+    const json = JSON.stringify(toolFor("service_address"));
+    expect(json).not.toContain("pattern");
+    expect(json).not.toContain("minLength");
+  });
+
+  it("gives the window slot a reference instant to resolve against", () => {
+    // "Tomorrow afternoon" is not an instant. Without `now` in the user message
+    // the model must either decline (the slot never fills) or invent a date (a
+    // truck at the wrong house on the wrong day).
+    const value = toolFor("appointment_window").input_schema.properties["value"] as {
+      anyOf: [{ properties: Record<string, { description?: string }> }, unknown];
+    };
+    expect(value.anyOf[0].properties["startsAt"]?.description).toMatch(/ISO 8601/);
+    expect(value.anyOf[0].properties["startsAt"]?.description).toMatch(
+      /current time you were given/i,
+    );
   });
 
   it("carries the urgency enum through verbatim", () => {
@@ -196,12 +248,24 @@ describe("the request body", () => {
     await extractor.extract("caller_name", "Dana, D-A-N-A", {
       callId: "call_99",
       turnIndex: 7,
+      // A *different clock*. This is the field that matters now: `now` changes on
+      // every turn of every call, so it is the single most tempting thing to
+      // "tidy" up into the system prompt, and the single most expensive. It must
+      // reach the model through `messages` and nowhere else.
+      now: "2027-01-01T05:30:00.000Z",
+      timeZone: "America/Los_Angeles",
     });
 
     const [first, second] = transport.requests.map((r) => r.body);
     expect(JSON.stringify(second!.system)).toBe(JSON.stringify(first!.system));
     expect(JSON.stringify(second!.tools)).toBe(JSON.stringify(first!.tools));
     expect(second!.messages).not.toEqual(first!.messages);
+
+    // And the clock really did reach the model — a prefix that is byte-identical
+    // because we forgot to send `now` at all would pass every line above.
+    expect(JSON.stringify(second!.messages)).toContain("2027-01-01T05:30:00.000Z");
+    expect(JSON.stringify(second!.messages)).toContain("America/Los_Angeles");
+    expect(JSON.stringify(first!.system)).not.toContain("2026-");
   });
 
   it("marks the last system block for caching", async () => {
@@ -442,13 +506,13 @@ describe("FakeExtractor", () => {
   it("records what it was asked", async () => {
     const fake = new FakeExtractor();
     await fake.extract("caller_name", "It's Dana", CTX);
-    await fake.extract("urgency", "Right now", { callId: "call_01", turnIndex: 1 });
+    await fake.extract("urgency", "Right now", { callId: "call_01", turnIndex: 1, now: EVAL_NOW, timeZone: "America/New_York" });
 
     expect(fake.calls).toHaveLength(2);
     expect(fake.callsFor("urgency")[0]).toEqual({
       key: "urgency",
       utterance: "Right now",
-      ctx: { callId: "call_01", turnIndex: 1 },
+      ctx: { callId: "call_01", turnIndex: 1, now: EVAL_NOW, timeZone: "America/New_York" },
     });
   });
 });

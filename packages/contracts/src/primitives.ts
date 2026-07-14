@@ -61,19 +61,73 @@ export type Address = z.infer<typeof AddressSchema>;
  * `formatted` is a model that can hallucinate a normalised address which never
  * existed, and every downstream read-back would quote it back to the caller.
  */
+/**
+ * **Every `.describe()` below is load-bearing, and each one is a constraint the
+ * model would otherwise never see.**
+ *
+ * `strict` tool use cannot express `pattern`, `minLength`, or `length`, so
+ * `strictify()` deletes them before the schema goes on the wire. The comment there
+ * says that is not a loss, because the contract re-validates the model's output on
+ * the way back in — and for *safety* that is exactly right: a ZIP of `ABCDE` is
+ * rejected and never reaches the geocoder.
+ *
+ * For *yield* it is dead wrong, and a live model is the only thing that could have
+ * shown us. `state: z.string().length(2)` reaches `claude`/`llama` as
+ * `{"type": "string"}`. Asked for the address in "1247 Calle Ocho, Miami Florida,
+ * 33135", the model answers `"Florida"` — which is *correct*, and which the
+ * contract then rejects. The outcome is `absent`, so the agent asks for the address
+ * again, and again, and escalates a caller who said it perfectly the first time.
+ * The slot could **never** fill. It went unnoticed through nine Steps because the
+ * fake extractor was scripted with `"FL"`.
+ *
+ * So the rule: **a semantic constraint that `strictify()` strips must be restated
+ * in a `description`, which strict mode does carry.** Zod still has the last word;
+ * the description is what gives the model a chance to earn it.
+ */
 export const AddressInputSchema = z.object({
-  line1: z.string().min(1),
-  line2: z.string().optional(),
-  city: z.string().min(1),
-  state: z.string().length(2),
-  postalCode: z.string().regex(/^\d{5}(-\d{4})?$/),
+  line1: z.string().min(1).describe("Street number and name, as the caller said it."),
+  line2: z
+    .string()
+    .optional()
+    .describe("Apartment, suite, or unit number. Null if the caller did not give one."),
+  city: z.string().min(1).describe("City name."),
+  state: z
+    .string()
+    .length(2)
+    .describe(
+      "The two-letter USPS state code, such as FL or NY. Never the full state name: a caller who says 'Miami Florida' means FL.",
+    ),
+  postalCode: z
+    .string()
+    .regex(/^\d{5}(-\d{4})?$/)
+    .describe("The five-digit US ZIP code, e.g. 33135. Do not invent one the caller did not say."),
 });
 export type AddressInput = z.infer<typeof AddressInputSchema>;
 
+/**
+ * The other slot a live model proved could not be filled — and this one could not
+ * be filled *in principle*, not merely in practice.
+ *
+ * An appointment window is two absolute instants. A caller says "tomorrow
+ * afternoon". Nothing in `ExtractionContext` used to tell the model **what day it
+ * is**, so the only honest answers were `null` (a decline, and the slot never
+ * fills) or a hallucinated date (a truck on the wrong day — principle #3's exact
+ * nightmare). `llama-3.3-70b` chose honesty and emitted
+ * `{"startsAt": null, "endsAt": null}`, which is not even in the schema, and Groq
+ * turned that into a `400 tool_use_failed`.
+ *
+ * `ExtractionContext` now carries `now` and `timeZone`, and the extractors render
+ * them into the **user message** — never the cached prefix, which is why they were
+ * not simply appended to the system prompt.
+ */
 export const TimeWindowSchema = z
   .object({
-    startsAt: IsoTimestampSchema,
-    endsAt: IsoTimestampSchema,
+    startsAt: IsoTimestampSchema.describe(
+      "When the window starts, as an ISO 8601 timestamp with a UTC offset, e.g. 2026-07-09T18:00:00.000Z. Resolve relative words like 'tomorrow afternoon' against the current time you were given.",
+    ),
+    endsAt: IsoTimestampSchema.describe(
+      "When the window ends, as an ISO 8601 timestamp with a UTC offset. Must be after startsAt.",
+    ),
   })
   .refine((w) => Date.parse(w.endsAt) > Date.parse(w.startsAt), {
     message: "endsAt must be after startsAt",

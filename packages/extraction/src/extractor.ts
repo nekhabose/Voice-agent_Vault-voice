@@ -50,6 +50,31 @@ export const SYSTEM_PROMPT = [
   "caller said, not your probability that it is a plausible value.",
 ].join("\n");
 
+/**
+ * The caller's words, plus the two facts they said nothing about.
+ *
+ * **This is `messages`, and it must stay `messages`.** Everything in here changes
+ * on every turn of every call — `now` most of all — and `tools` and `system` render
+ * *before* it, so a single one of these bytes moved up into the cached prefix
+ * invalidates the prompt cache for every turn of every call, multiplies extraction
+ * cost roughly tenfold, and reports no error at all. `extraction.test.ts` asserts
+ * the rendered prefix is byte-identical across two calls with different ids, turn
+ * indices, *and clocks*, which is the property that breaks if somebody "tidies" the
+ * timestamp into the system prompt.
+ *
+ * Shared with `GroqExtractor`, because the reference instant is not a vendor's
+ * business and a second copy of this that drifted would resolve "tomorrow" in two
+ * different time zones.
+ */
+export function userMessage(utterance: string, ctx: ExtractionContext): string {
+  return [
+    `The current time is ${ctx.now} (the caller's local time zone is ${ctx.timeZone}).`,
+    "Resolve any relative time the caller mentions against that.",
+    "",
+    `The caller said: ${utterance}`,
+  ].join("\n");
+}
+
 export interface ExtractionUsage {
   readonly slot: SlotKey;
   readonly inputTokens: number;
@@ -89,6 +114,7 @@ export class AnthropicExtractor implements SlotExtractor {
   request(
     key: SlotKey,
     utterance: string,
+    ctx: ExtractionContext,
   ): Anthropic.MessageCreateParamsNonStreaming {
     return {
       model: this.model,
@@ -107,18 +133,18 @@ export class AnthropicExtractor implements SlotExtractor {
         name: toolNameFor(key),
         disable_parallel_tool_use: true,
       },
-      messages: [{ role: "user", content: utterance }],
+      messages: [{ role: "user", content: userMessage(utterance, ctx) }],
     };
   }
 
   async extract(
     key: SlotKey,
     utterance: string,
-    _ctx: ExtractionContext,
+    ctx: ExtractionContext,
   ): Promise<ExtractionOutcome> {
     let message: Anthropic.Message;
     try {
-      message = await this.client.messages.create(this.request(key, utterance));
+      message = await this.client.messages.create(this.request(key, utterance, ctx));
     } catch (error) {
       return outageOrThrow(error);
     }
@@ -143,8 +169,17 @@ export class AnthropicExtractor implements SlotExtractor {
    * invalidates only the messages tier, and the tools + system cache survives.
    */
   async prewarm(keys: readonly SlotKey[] = SLOT_KEYS): Promise<void> {
+    // A fixed context: pre-warm exists to cache the `tools` + `system` prefix, and
+    // that prefix does not read `ctx` at all. The values here reach `messages`,
+    // which is not the tier being warmed.
+    const warm: ExtractionContext = {
+      callId: "warmup",
+      turnIndex: 0,
+      now: "1970-01-01T00:00:00.000Z",
+      timeZone: "UTC",
+    };
     for (const key of keys) {
-      const { tool_choice: _dropped, ...rest } = this.request(key, "warmup");
+      const { tool_choice: _dropped, ...rest } = this.request(key, "warmup", warm);
       try {
         const message = await this.client.messages.create({
           ...rest,

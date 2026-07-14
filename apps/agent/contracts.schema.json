@@ -299,11 +299,13 @@
           "properties": {
             "startsAt": {
               "type": "string",
-              "format": "date-time"
+              "format": "date-time",
+              "description": "When the window starts, as an ISO 8601 timestamp with a UTC offset, e.g. 2026-07-09T18:00:00.000Z. Resolve relative words like 'tomorrow afternoon' against the current time you were given."
             },
             "endsAt": {
               "type": "string",
-              "format": "date-time"
+              "format": "date-time",
+              "description": "When the window ends, as an ISO 8601 timestamp with a UTC offset. Must be after startsAt."
             }
           },
           "required": [

@@ -1,20 +1,19 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { systemClock } from "@ledgerline/contracts";
 import { PgTriageStore, withTenant } from "@ledgerline/db";
-import { AnthropicTriager, TRIAGE_MODEL } from "@ledgerline/triage";
 import { runTriage } from "@ledgerline/workflows";
 import { database, isCronRequest } from "@/lib/cron";
+import { triagerFor } from "@/lib/model-provider";
 import { tenantResolver } from "@/lib/tenant";
 
 /**
  * The nightly correction triage (plan, Step 7.3 — scheduling what Step 6 built).
  *
- * `runTriage()` has existed since Step 6 and nothing called it. This is the caller, and
- * it is **the only place in the tree that constructs an `AnthropicTriager`**: `workflows`
- * binds the port, `triage` owns the model, and the edge binds the implementation. Ports
- * down, implementations at the edge.
+ * `runTriage()` has existed since Step 6 and nothing called it. This is the caller, and it
+ * binds the *port*: `workflows` knows a `CorrectionTriager` exists and cannot tell which
+ * vendor is behind it. `lib/model-provider.ts` makes that choice, once, from the
+ * environment. Ports down, implementations at the edge — and the edge is one file.
  *
- * Nightly, because a corrected booking is not urgent and `claude-opus-4-8` is not cheap.
+ * Nightly, because a corrected booking is not urgent and a triage model is not cheap.
  *
  * **Every way this route can fail makes our published number worse, not better.** If it
  * never runs, corrections stay unclassified; an unclassified correction counts as an
@@ -37,21 +36,23 @@ export async function GET(request: Request): Promise<Response> {
     return Response.json({ error: "no tenant" }, { status: 401 });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    // A 500, not a silent no-op. A triage pass that "succeeded" having classified nothing
-    // is indistinguishable, on a dashboard, from a night with no corrections.
-    return Response.json({ error: "ANTHROPIC_API_KEY is not set" }, { status: 500 });
+  const binding = triagerFor();
+  if (typeof binding === "string") {
+    // A 500, not a silent no-op and not a fallback to the other vendor. A triage pass that
+    // "succeeded" having classified nothing is indistinguishable, on a dashboard, from a
+    // night with no corrections — and it costs us money, because an unclassified correction
+    // is an agent error (principle #5) and an agent error is a booking we waive (#7).
+    return Response.json({ error: binding }, { status: 500 });
   }
 
   const { db, close } = database();
   try {
     const report = await withTenant(db, tenantId, (tx) =>
       runTriage({
-        triager: new AnthropicTriager({ client: new Anthropic({ apiKey }) }),
+        triager: binding.triager,
         store: new PgTriageStore(tx, tenantId),
         clock: systemClock,
-        model: TRIAGE_MODEL,
+        model: binding.model,
       }),
     );
 

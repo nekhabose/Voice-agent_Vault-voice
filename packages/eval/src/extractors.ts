@@ -7,10 +7,14 @@ import type {
 import {
   AnthropicExtractor,
   FakeExtractor,
+  GroqExtractor,
   filled,
   type ExtractionUsage,
+  type GroqExtractionUsage,
   type Script,
 } from "@ledgerline/extraction";
+import type { StructuredMode } from "@ledgerline/groq";
+import type Groq from "groq-sdk";
 import { DEFAULT_CONFIDENCE, type Scenario } from "./simulate.js";
 
 /**
@@ -68,5 +72,31 @@ export function anthropicExtractor(
   const extractor = new AnthropicExtractor(
     onUsage ? { client, onUsage } : { client },
   );
+  return () => extractor;
+}
+
+/**
+ * The other live factory, and the one that can actually run.
+ *
+ * A Groq credential exists, so this is the arm that finally answers the question
+ * the eval was built to ask and has never been able to: **given what the caller
+ * actually said, does a real model fill the slot correctly?** The fake arm proves
+ * the port, the validators, and the machine carry a value through intact. It
+ * cannot prove the model heard it, and the model is the part the literature says
+ * fails.
+ *
+ * `mode` is passed through so one model can be scored against *both* of Groq's
+ * structured-output mechanisms where it supports both — §11's A/B, which is the
+ * whole reason `structuredRequest` builds either from one schema.
+ */
+export function groqExtractor(
+  client: Groq,
+  options: {
+    readonly model?: string;
+    readonly mode?: StructuredMode;
+    readonly onUsage?: (usage: GroqExtractionUsage) => void;
+  } = {},
+): (scenario: Scenario) => SlotExtractor {
+  const extractor = new GroqExtractor({ client, ...options });
   return () => extractor;
 }

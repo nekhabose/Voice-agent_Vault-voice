@@ -126,6 +126,25 @@ export interface SlotTool {
  * `null` is the model's only way to say "not in this utterance". A forced
  * `tool_choice` means it must call the tool; without a null escape it would
  * have to invent a name for a caller who never gave one.
+ *
+ * **The null must be all-or-nothing, and saying so out loud is load-bearing.** A
+ * slot whose value is an object — `service_address`, `appointment_window` — has a
+ * third move the model will reach for unprompted: fill the parts it heard and null
+ * the parts it did not. That move is not in the schema (`city` is a `string`, not a
+ * `string | null`), so a live `llama-3.3-70b` handed "1247 Calle Ocho." — a real
+ * caller, giving a real street, in the `answers-in-fragments` scenario — tried to
+ * emit `{line1: "1247 Calle Ocho", city: null, state: null, postalCode: null}` and
+ * Groq rejected the whole generation with `tool_use_failed`.
+ *
+ * Which our own taxonomy then turned into `unavailable` → retry → **escalate to a
+ * human**. So before this line existed, *every caller who gave a street without a
+ * city was handed to a person*, and the fake extractor could never have told us,
+ * because it was scripted with the complete address the caller never said.
+ *
+ * The fix is not to loosen the schema — a half-filled address is exactly what
+ * principle #3 forbids reaching the geocoder. It is to tell the model that a
+ * partial answer is a `null` answer, so the outcome is `absent`, so the machine
+ * **asks the caller for the rest**, which is what a person would do.
  */
 export function toolFor(key: SlotKey): SlotTool {
   const spec = SLOT_SPECS[key];
@@ -142,7 +161,12 @@ export function toolFor(key: SlotKey): SlotTool {
       properties: {
         value: {
           ...nullable(value),
-          description: `The caller's ${spec.label}, or null.`,
+          description:
+            `The caller's ${spec.label}, or null. ` +
+            `Give a value only if this utterance states every part of it. ` +
+            `If the caller stated only some of it, the whole value is null — ` +
+            `never fill in a part they did not say, and never leave a part empty. ` +
+            `A null costs one more question; a guess costs a truck at the wrong house.`,
         },
         confidence: {
           type: "number",

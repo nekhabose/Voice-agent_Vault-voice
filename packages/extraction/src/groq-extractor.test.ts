@@ -12,6 +12,8 @@ import { SYSTEM_PROMPT } from "./extractor.js";
 import { GroqExtractor, structuredToolFor } from "./groq-extractor.js";
 import { toolNameFor } from "./tool.js";
 
+const EVAL_NOW = "2026-07-08T12:00:00.000Z";
+
 /**
  * The Groq binding, proven offline — the same discipline as `extraction.test.ts`,
  * driven through the real SDK, the real tool schema derived from the contract,
@@ -24,7 +26,7 @@ import { toolNameFor } from "./tool.js";
  * `openai/gpt-oss-120b` actually did when handed our address tool.
  */
 
-const CTX: ExtractionContext = { callId: "call-1", turnIndex: 3 };
+const CTX: ExtractionContext = { callId: "call-1", turnIndex: 3, now: EVAL_NOW, timeZone: "America/New_York" };
 
 const LLAMA = "llama-3.3-70b-versatile";
 const GPT_OSS = "openai/gpt-oss-120b";

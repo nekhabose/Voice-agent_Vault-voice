@@ -38,6 +38,28 @@ export interface ExtractionContext {
   readonly callId: string;
   /** Zero-based index of the caller utterance being extracted from. */
   readonly turnIndex: number;
+  /**
+   * Now, as an ISO 8601 instant — and the field whose absence made
+   * `appointment_window` **unfillable in principle**.
+   *
+   * A caller says "tomorrow afternoon". The slot wants two absolute timestamps.
+   * Without a reference instant the model's only honest move is to decline, and
+   * its only *useful* move is to invent a date — which is a truck at the wrong
+   * house on the wrong day, and the exact failure principle #3 exists to prevent.
+   * A live `llama-3.3-70b` chose honesty, emitted `{startsAt: null, endsAt: null}`,
+   * and Groq rejected the generation outright. Nine Steps of green tests never
+   * caught it, because the fake extractor was scripted with the answer.
+   *
+   * It belongs here rather than in the system prompt because it changes on every
+   * turn, and one interpolated byte in the cached prefix multiplies extraction cost
+   * roughly tenfold with no error. The extractors render it into `messages`.
+   */
+  readonly now: string;
+  /**
+   * The tenant's IANA zone. "Tomorrow afternoon" is a local idea, and a window
+   * resolved in UTC for a shop in Miami is a window on the wrong afternoon.
+   */
+  readonly timeZone: string;
 }
 
 export type ExtractionOutcome =

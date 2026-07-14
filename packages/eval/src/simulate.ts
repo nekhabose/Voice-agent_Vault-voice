@@ -158,6 +158,12 @@ export async function simulate(
     const extractionContext: ExtractionContext = {
       callId: scenario.name,
       turnIndex: callerTurnIndex++,
+      // The eval's own clock and zone — the same two the `windowPolicy` validates
+      // the resulting window against. They must be the same two, or the model
+      // resolves "tomorrow afternoon" against one clock and the validator rejects
+      // it against another, and the failure looks like the model's.
+      now: deps.windowPolicy.clock.now().toISOString(),
+      timeZone: deps.windowPolicy.timeZone,
     };
 
     // The classifier runs on every caller utterance, in parallel with and

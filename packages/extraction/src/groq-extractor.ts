@@ -14,7 +14,7 @@ import type {
 } from "@ledgerline/contracts";
 import type Groq from "groq-sdk";
 import type { ChatCompletionCreateParamsNonStreaming } from "groq-sdk/resources/chat/completions";
-import { interpretSlotInput, SYSTEM_PROMPT } from "./extractor.js";
+import { interpretSlotInput, SYSTEM_PROMPT, userMessage } from "./extractor.js";
 import { toolFor, toolNameFor } from "./tool.js";
 
 /**
@@ -90,12 +90,20 @@ export class GroqExtractor implements SlotExtractor {
   }
 
   /** The outgoing request. Asserted on directly, exactly as the Anthropic one is. */
-  request(key: SlotKey, utterance: string): ChatCompletionCreateParamsNonStreaming {
+  request(
+    key: SlotKey,
+    utterance: string,
+    ctx: ExtractionContext,
+  ): ChatCompletionCreateParamsNonStreaming {
     return structuredRequest({
       model: this.model,
       mode: this.mode,
       system: SYSTEM_PROMPT,
-      user: utterance,
+      // The reference instant reaches the model here, in `messages`, and shares
+      // `userMessage` with the Anthropic binding — because "what time is it" is
+      // not a vendor's business, and two copies would resolve "tomorrow" in two
+      // different time zones.
+      user: userMessage(utterance, ctx),
       tool: structuredToolFor(key),
       maxTokens: MAX_TOKENS,
     });
@@ -104,12 +112,12 @@ export class GroqExtractor implements SlotExtractor {
   async extract(
     key: SlotKey,
     utterance: string,
-    _ctx: ExtractionContext,
+    ctx: ExtractionContext,
   ): Promise<ExtractionOutcome> {
     let completion;
     try {
       completion = await this.client.chat.completions.create(
-        this.request(key, utterance),
+        this.request(key, utterance, ctx),
       );
     } catch (error) {
       // Outage, or a model that could not fill the schema. Both `unavailable`,

@@ -13,8 +13,10 @@
     "@ledgerline/contracts": "*",
     "@ledgerline/conversation": "*",
     "@ledgerline/extraction": "*",
+    "@ledgerline/groq": "*",
     "@ledgerline/safety": "*",
-    "@ledgerline/validators": "*"
+    "@ledgerline/validators": "*",
+    "groq-sdk": "^1.3.0"
   },
   "devDependencies": {
     "@ledgerline/anthropic": "*"

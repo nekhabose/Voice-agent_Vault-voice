@@ -733,6 +733,17 @@ need a schema change, a migration, and a conversation.
   score (3); granting **`UPDATE`/`DELETE` on `reliability_reports`**, making a figure
   retractable (2); and dropping the idempotency guard, so a **retried cron stacks two
   figures for one quarter** into a table nothing can clean up (1).
+  And, added with the Groq bindings and the first live score: **dropping the `.describe()` on
+  `AddressInputSchema.state`**, so the model answers `"Florida"` and `service_address` can never
+  fill (1 test); **dropping `now`/`timeZone` from `ExtractionContext`**, so `appointment_window`
+  is unfillable in principle (1, plus the byte-identical-prefix guard, which now varies the
+  *clock* between two calls and asserts the cached prefix does not move); **moving the reference
+  instant into the system prompt** "to tidy it up", which silently multiplies extraction cost
+  roughly tenfold (1); **letting `toolFor` stop saying a partial answer is a null answer**, after
+  which a caller who gives a street with no city is escalated to a human (1); and, in
+  `packages/groq`, **mapping `400 tool_use_failed` to `absent`** — the comfortable wrong answer,
+  which blames the caller for our failure and hides it from the published number (3, one per call
+  site) — or **letting it throw**, which drops the call (3).
   **`TriageStore.classify` writing `correctedFields` is not on this list because it
   is a type error, not a test failure** — which is the stronger guarantee. As of Step 7
   it is *also* a Postgres permission error, which holds for a raw `db.execute()`. **An
@@ -764,25 +775,36 @@ Stated plainly, because a README that implies otherwise is marketing.
   are tested exhaustively in `telemetry` and `db`; the JSX around them is not, and the
   published-figure branch of that page has never rendered against real data, because there
   is none.
-- **The Anthropic extractor has never spoken to a live model; the Groq one has, and it
-  failed.** `packages/extraction` holds two bindings. The Anthropic one is real code against
-  the real SDK, but every test drives it through an injected `fetch` and committed fixtures,
-  and **those fixtures were hand-authored, not recorded** — no Anthropic credential exists
-  here (`fixtures.ts` says so at the top). Two things nobody has verified: what
-  `claude-sonnet-5` actually emits, and whether the prompt-cache prefix is even large enough
-  to cache (a few hundred tokens against a Sonnet-tier minimum near 2k, and a short prefix
-  caches *silently*).
+- **The Anthropic extractor has never spoken to a live model.** `packages/extraction` holds
+  two bindings. The Anthropic one is real code against the real SDK, but every test drives it
+  through an injected `fetch` and committed fixtures, and **those fixtures were hand-authored,
+  not recorded** — no Anthropic credential exists here (`fixtures.ts` says so at the top). Two
+  things nobody has verified: what `claude-sonnet-5` actually emits, and whether the
+  prompt-cache prefix is even large enough to cache (a few hundred tokens against a Sonnet-tier
+  minimum near 2k, and a short prefix caches *silently*).
 
-  The Groq binding is different, and its one live datum is the most useful thing in this file.
-  **`openai/gpt-oss-120b`, handed `record_service_address` and "1247 Calle Ocho, Miami FL
-  33135", returned `{"value": {"address": "1247 Calle Ocho, Miami Florida, 33135"}}`** — it
-  flattened a four-field address into a single string, failed the schema, and the API turned
-  that into a `400 tool_use_failed`. On turn one. That is VoiceAgentBench's 60.6%
-  parameter-fill finding reproducing live on the first call this repository ever made, and it
-  is *why* principle #1 exists. What we still do not have is a **score**: nobody has run the
-  eval's scenarios through a live model and counted critical-slot accuracy, so we do not know
-  whether llama-3.3-70b is 95% or 70% on our slots. That number is task 5.5, it is the whole
-  point of the wedge, and it is now unblocked by a credential that exists.
+- **The Groq extractor HAS spoken to a live model, and the score is bad — but the score is not
+  yet the model's fault.** `scripts/score-extractor.ts` runs the eval's 13 scenarios through a
+  live `SlotExtractor`. First measurement: **22.2% critical-slot accuracy**, identical across
+  three different models — and an identical number across three models is never a fact about
+  models. It was a fact about **us**. Three latent contract bugs, all of the same shape, all
+  invisible to a fake extractor scripted with the right answer (see the change log). Fixing the
+  first two took it to **33.3%**; the third fix (`toolFor`'s all-or-nothing rule) **has not been
+  measured**, because the Groq free tier's **100,000 tokens/day** ran out mid-run — a full
+  four-model A/B costs roughly 180k. So the honest state is: *the number is 33.3% and rising,
+  the last fix is unscored, and we do not yet know what a live model can actually do on our
+  slots.* Do not quote 33.3% as a model result. It is a floor on our own bugs.
+
+  **What the rate limit costs is not money, it is the experiment.** 5.5, the §11 A/B, and
+  6.5's model-vs-human agreement all need more tokens per day than the free tier allows.
+
+  **And the p95 latency is the finding nobody will want.** Every model measured — including
+  `llama-3.1-8b-instant`, the "fast" one — came in **far over the 800ms extraction budget**
+  (2.4s–9.3s p50). Those figures are inflated by retries on the failing calls, and a clean
+  single call measured **425–555ms**, which *is* within budget. Both numbers are real and
+  neither is the answer: the honest reading is that the budget is reachable when the schema
+  fits, and unreachable the moment a call has to be retried. `checkBudgets()` blocks a merge at
+  p95 first word > 1.2s, and TTS is not free.
 - **`eval` now binds the real `SlotExtractor` port** (Step 5.1), but only the fake
   side runs. The PR suite drives `FakeExtractor` scripted from each scenario's
   fills; the nightly `AnthropicExtractor` binding is proven offline through an
@@ -1003,6 +1025,17 @@ Stated plainly, because a README that implies otherwise is marketing.
 - **Groq serves no embedding models.** Task 6.6 (a real `Embedder`, and calibrating
   `SIMILARITY_FLOOR` against something with semantics) therefore still needs a *third* vendor.
   A Groq key does not unblock the FAQ.
+- **The Groq free tier is 100,000 tokens/day, and one four-model eval run costs ~180k.** A
+  rate-limited run does not look like a rate-limited run: every call comes back `429`, degrades
+  to `unavailable`, retries, and escalates — so the *scoreboard* fills with `AGENT_ERROR` and
+  reads exactly like a catastrophically bad model. It was caught only because p50 latency fell
+  to 72ms, which no model can do. **Check the reason string before you believe a bad score.**
+- **`strictify()` strips a constraint; a `description` must put it back.** This is the rule
+  behind three separate production bugs (see the change log) and it is not obvious, because the
+  comment in `tool.ts` correctly says the stripping is *safe* — Zod re-validates. Safe is not the
+  same as *satisfiable*. A model that never sees `length(2)` will answer `"Florida"`, and the
+  slot will never fill for as long as the product exists. Any new semantic constraint on a
+  `.extraction` schema needs a `.describe()` in the same commit.
 - **`DATABASE_URL` must name `ledgerline_app`, not Neon's default role.** The default is the
   table owner, and Postgres exempts an owner from RLS unless the table is FORCEd — and a
   *superuser* even then. Connect as it and every policy is decoration. See principle #6;
@@ -1089,6 +1122,56 @@ Stated plainly, because a README that implies otherwise is marketing.
 ---
 
 ## Change log
+
+- **The first live score, and the three bugs it found — every one of them ours.** *(1,047
+  tests, typecheck clean.)* `scripts/score-extractor.ts` runs the eval's 13 scenarios through a
+  **live** `SlotExtractor`. Nine Steps of green tests, 99.4% coverage, and the first number it
+  produced was **22.2% critical-slot accuracy — identical across three different models.**
+
+  **An identical score across three models is never a fact about models.** It was three latent
+  bugs in our own contract, each of the same shape, each one *structurally invisible* to every
+  test we had — because `FakeExtractor` was scripted with the right answer, so it could never
+  fail the way a model fails.
+
+  1. **`service_address` could never fill for a caller who said "Miami Florida".** `state` is
+     `z.string().length(2)`. `strictify()` deletes `length` — strict mode cannot express it —
+     so the model saw `{"type": "string"}`, answered `"Florida"`, and Zod rejected it. Outcome:
+     `absent`. So we ask for the address again. And again. And escalate a caller who said it
+     perfectly the first time.
+  2. **`appointment_window` could never fill at all, in principle.** It wants two absolute ISO
+     instants; a caller says "tomorrow afternoon"; and `ExtractionContext` **never told the
+     model what day it was**. `llama-3.3-70b` did the honest thing — emitted
+     `{startsAt: null, endsAt: null}` — which is not in the schema, so Groq rejected the whole
+     generation. The dishonest thing would have been to invent a date, which is a truck at the
+     wrong house on the wrong day.
+  3. **A caller who gave a street without a city was handed to a human.** Asked for the address
+     in `"1247 Calle Ocho."`, the model tried to half-fill it (`city: null, state: null`) —
+     a move the schema does not have — and Groq's `tool_use_failed` became `unavailable`,
+     which retries once and then **escalates**. The `answers-in-fragments` scenario is a real
+     persona and this is what it got.
+
+  **The root cause is one sentence, and it inverts a comment that has been in `tool.ts` since
+  Step 1.** `strictify()` strips `pattern`, `minLength`, and `length` because strict mode
+  rejects them, and the comment says *"This is not a loss"* — because Zod re-validates on the
+  way in. For **safety** that is exactly right and always was: `ABCDE` never reaches the
+  geocoder. For **yield** it is precisely backwards. *A model that is never shown a constraint
+  cannot satisfy it, and a slot whose constraint the model cannot satisfy never fills.* Every
+  stripped constraint is now restated as a `description`, which strict mode **does** carry;
+  `ExtractionContext` carries `now` and `timeZone` (into `messages`, never the cached prefix);
+  and `toolFor` tells the model that a partial answer is a `null` answer, so the machine
+  **asks for the rest** instead of escalating.
+
+  **Fixes 1 and 2 took the score from 22.2% to 33.3%. Fix 3 is unmeasured**, because the Groq
+  free tier's **100,000 tokens/day** ran out mid-run (a four-model A/B costs ~180k). Every call
+  in that run came back `429`, and the taxonomy degraded it to `outage:` → `unavailable` →
+  `AGENT_ERROR` exactly as designed — which is the one cheerful thing here: the failure was
+  loud, correctly classified, and impossible to mistake for a caller who said nothing. **Do not
+  quote 33.3% as a model result.** It is a floor on our own bugs, and the last fix is not in it.
+
+  **This is what the eval was for, and it took a live model nine Steps to be allowed to say
+  so.** Every one of these bugs is in the class `plan.md` predicted — principle #3, "the model's
+  output space is the contract, narrowed" — and every one of them survived because the contract
+  narrowed the output space *without telling the model where the walls were*.
 
 - **`packages/groq` — the second vendor, and the first live model call this repo has ever
   made.** *(1,043 tests, typecheck clean.)* A Groq credential arrived, so the three model call

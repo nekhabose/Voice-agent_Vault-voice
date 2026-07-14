@@ -553,7 +553,15 @@ export class CallRuntime {
   /* ---- context builders ---- */
 
   private extractionContext(): ExtractionContext {
-    return { callId: this.deps.callId, turnIndex: this.callerTurnIndex };
+    return {
+      callId: this.deps.callId,
+      turnIndex: this.callerTurnIndex,
+      // Both were already here — the runtime has held a `Clock` and the tenant's
+      // IANA zone since Step 4. What it never did was tell the extractor, so a
+      // caller saying "tomorrow afternoon" was asking the model to guess the date.
+      now: this.deps.clock.now().toISOString(),
+      timeZone: this.deps.tenant.timeZone,
+    };
   }
 
   private utteranceContext(effect: Effect): UtteranceContext {
