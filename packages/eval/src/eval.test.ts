@@ -1,4 +1,12 @@
+import { RecordingTransport, testClient } from "@ledgerline/anthropic";
+import type { ExtractionOutcome, SlotExtractor } from "@ledgerline/contracts";
+import {
+  CALLER_NAME_FILLED,
+  FakeExtractor,
+  unavailable,
+} from "@ledgerline/extraction";
 import { describe, expect, it } from "vitest";
+import { anthropicExtractor, scriptFromScenario } from "./extractors.js";
 import { evalDeps } from "./harness.js";
 import { MIAMI_FORMATTED, SCENARIOS } from "./scenarios.js";
 import { runAll, simulate, score, type Scenario } from "./simulate.js";
@@ -29,9 +37,10 @@ describe("simulated callers", () => {
 
     expect(s.failures).toEqual([]);
     expect(s.outcomeAccuracy).toBe(1);
-    // Critical-slot accuracy is the metric Phase 0 gates the wedge on. Here the
-    // extractor is a stub, so this only proves the validators and the machine
-    // carry values through intact — not that ASR heard them right.
+    // Critical-slot accuracy is the metric the wedge is scored on. In the PR arm
+    // the extractor is `FakeExtractor` scripted from the scenario, so this proves
+    // the port, the validators, and the machine carry values through intact — not
+    // that `claude-sonnet-5` heard them right. That is the nightly arm (5.1/5.5).
     expect(s.criticalSlotAccuracy).toBe(1);
     expect(s.scenarios).toBeGreaterThanOrEqual(10);
   });
@@ -42,6 +51,109 @@ describe("simulated callers", () => {
     const booked = SCENARIOS.filter((s) => s.expect.outcome === "BOOKED").map((s) => s.name);
 
     expect(contained.sort()).toEqual(booked.sort());
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The real extraction path (Step 5.1)                                         */
+/* -------------------------------------------------------------------------- */
+
+describe("the SlotExtractor port, not a baked-in value", () => {
+  it("hands each fill's utterance to the extractor, and it is what got booked", async () => {
+    const scenario = find("english/straightforward");
+    const fake = new FakeExtractor(scriptFromScenario(scenario));
+    const result = await simulate(scenario, { ...deps, makeExtractor: () => fake });
+
+    expect(result.outcome).toBe("BOOKED");
+    // The collaborator's view: the address slot was extracted from exactly the
+    // utterance that stated it, not read out of the scenario. Swap the fake for
+    // AnthropicExtractor and this same call goes to the model.
+    expect(fake.callsFor("service_address").map((c) => c.utterance)).toEqual([
+      "It's 1247 Calle Ocho, Miami, 33135.",
+    ]);
+    expect(fake.callsFor("caller_name")[0]?.utterance).toBe("Hi, this is Daniel Okafor.");
+    // The turn index rides the ExtractionContext, exactly as on a real call, so a
+    // per-call value has somewhere to go other than the cached prompt prefix.
+    expect(fake.callsFor("appointment_window")[0]?.ctx.turnIndex).toBe(4);
+  });
+
+  it("re-extracts a corrected slot from the correction utterance", async () => {
+    const scenario = find("english/address-not-real");
+    const fake = new FakeExtractor(scriptFromScenario(scenario));
+    const result = await simulate(scenario, { ...deps, makeExtractor: () => fake });
+
+    expect(result.outcome).toBe("BOOKED");
+    // Two address utterances, two extractor calls — the geocoder-rejected first
+    // try and the fix. The port is asked again, not handed a second baked value.
+    expect(fake.callsFor("service_address").map((c) => c.utterance)).toEqual([
+      "It's 9999 Nowhere Lane.",
+      "Sorry — 1247 Calle Ocho.",
+    ]);
+  });
+
+  it("retries an extraction outage once, then escalates as AGENT_ERROR", async () => {
+    // The model is down on the first ask and the retry: a human's problem, never
+    // a caller re-asked their name (principle #3). Mirrors CallRuntime exactly.
+    const down: SlotExtractor = { extract: async () => unavailable("503 from Anthropic") };
+    const result = await simulate(find("english/straightforward"), {
+      ...deps,
+      makeExtractor: () => down,
+    });
+
+    expect(result.outcome).toBe("AGENT_ERROR");
+    expect(result.contained).toBe(false);
+  });
+
+  it("recovers when the retry succeeds behind the filler", async () => {
+    const scenario = find("english/straightforward");
+    const script = scriptFromScenario(scenario);
+    // Down on the first ask for the name, up on the retry; everything else as
+    // scripted. One transient outage must not lose the call.
+    const fake = new FakeExtractor({
+      ...script,
+      caller_name: [unavailable("transient"), ...(script.caller_name as ExtractionOutcome[])],
+    });
+    const result = await simulate(scenario, { ...deps, makeExtractor: () => fake });
+
+    expect(result.outcome).toBe("BOOKED");
+    expect(result.slots.caller_name).toBe("Daniel Okafor");
+  });
+});
+
+describe("the nightly arm binds the real AnthropicExtractor", () => {
+  // Not a live model call: the SDK's `fetch` is injected and answers from a
+  // committed wire body, exactly as `packages/extraction`'s own replay suite
+  // does. What this proves that the fake cannot is that the eval harness drives
+  // the *real* extractor end to end — the cached request it builds, the tool_use
+  // block it interprets — and the value flows through the validators and the
+  // machine. The live-model version (re-recording fixtures, asserting the cache
+  // hits) is task 5.5, and it belongs in the nightly arm, never in `npm test`.
+  it("drives a real cached request and books on the value the model returned", async () => {
+    const transport = new RecordingTransport((body) => {
+      const name = (body.tool_choice as { name?: string }).name;
+      if (name === "record_caller_name") return { json: CALLER_NAME_FILLED };
+      throw new Error(`unscripted tool ${name}`);
+    });
+
+    const scenario: Scenario = {
+      name: "nightly/name-then-human",
+      turns: [
+        { text: "Hi, it's Dana Whitfield.", fills: [{ key: "caller_name", raw: "unused" }] },
+        { text: "Actually, can I talk to a person?", requestsHuman: true },
+      ],
+      expect: { outcome: "ESCALATED_OTHER" },
+    };
+
+    const result = await simulate(scenario, {
+      ...deps,
+      makeExtractor: anthropicExtractor(testClient(transport)),
+    });
+
+    // The stored name is what the model's tool_use returned, not the fill's raw.
+    expect(result.slots.caller_name).toBe("Dana Whitfield");
+    expect(result.outcome).toBe("ESCALATED_OTHER");
+    // And the request the real extractor built is cache-safe: thinking pinned off.
+    expect(transport.only.thinking).toEqual({ type: "disabled" });
   });
 });
 
@@ -103,7 +215,7 @@ describe("backtracking", () => {
 
 describe("the emergency classifier interrupts everything", () => {
   it("abandons a half-finished booking on a gas leak", async () => {
-    const result = await simulate(find("spanish/gas-leak-mid-call"), deps);
+    const result = await simulate(find("hazard/spanish-utterance-on-an-english-line"), deps);
 
     expect(result.hazard).toBe("GAS_LEAK");
     expect(result.outcome).toBe("ESCALATED_EMERGENCY");
@@ -113,7 +225,7 @@ describe("the emergency classifier interrupts everything", () => {
   });
 
   it("uses the weather the caller never mentioned", async () => {
-    const freezing = await simulate(find("spanish/no-heat-in-a-freeze"), deps);
+    const freezing = await simulate(find("hazard/spanish-no-heat-in-a-freeze"), deps);
     expect(freezing.hazard).toBe("NO_HEAT_FREEZING");
     expect(freezing.outcome).toBe("ESCALATED_EMERGENCY");
   });
@@ -163,9 +275,9 @@ describe("caller-driven exits", () => {
   });
 });
 
-describe("code-switching", () => {
-  it("books a caller who switches language mid-sentence", async () => {
-    const result = await simulate(find("spanish/code-switched"), deps);
+describe("fragmentary answers", () => {
+  it("books a caller who never finishes a sentence", async () => {
+    const result = await simulate(find("english/answers-in-fragments"), deps);
     expect(result.outcome).toBe("BOOKED");
     expect(result.slots.caller_name).toBe("Rosa Delgado");
     expect(result.slots.service_address).toBe(MIAMI_FORMATTED);

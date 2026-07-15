@@ -1,47 +1,47 @@
-import type { Locale, TimeWindow } from "@ledgerline/contracts";
+import type { TransactionalSms } from "@ledgerline/compliance";
+import type { TimeWindow } from "@ledgerline/contracts";
 
-export interface SmsMessage {
-  readonly to: string;
-  readonly body: string;
-}
-
+/**
+ * **The port takes a `TransactionalSms`, not an arbitrary `{to, body}`** (Step 8).
+ *
+ * That one type substitution is the TCPA constraint. `packages/compliance` brands the
+ * message, and the only thing in the tree that can mint one reads the destination out
+ * of a `PendingBookingPayload` — so the sole number this system is able to text is the
+ * `callback_phone` a caller gave us on their own call and confirmed on a read-back.
+ *
+ * An outbound marketing send is therefore not a policy we have decided against. It is
+ * an expression that does not typecheck, which is the same guarantee
+ * `Pick<CrmAdapter, "readJob">` gives the poller and `TriageStore.classify` gives the
+ * raw diff.
+ */
 export interface SmsSender {
-  send(message: SmsMessage): Promise<void>;
+  send(message: TransactionalSms): Promise<void>;
 }
 
 export class FakeSms implements SmsSender {
-  readonly sent: SmsMessage[] = [];
+  readonly sent: TransactionalSms[] = [];
 
   constructor(private readonly failWith?: Error) {}
 
-  async send(message: SmsMessage): Promise<void> {
+  async send(message: TransactionalSms): Promise<void> {
     if (this.failWith) throw this.failWith;
     this.sent.push(message);
   }
 }
 
 /**
- * The caller hears their own language, so they read it too.
- *
- * Only `en` and `es` are written; the remaining locales in `Locale` are Phase 3
- * and fall back to English rather than shipping machine-translated confirmations
- * that a contractor cannot proofread.
+ * The product is English-only. `PendingBookingPayload.customer.locale` still
+ * records the caller's preferred language and still reaches the contractor's CRM,
+ * so a human can call them back appropriately — but we do not send a confirmation
+ * we cannot proofread.
  */
-const TEMPLATES: Partial<Record<Locale, (address: string, when: string) => string>> = {
-  en: (address, when) =>
-    `Confirmed: we'll be at ${address} on ${when}. Reply CANCEL to cancel.`,
-  es: (address, when) =>
-    `Confirmado: llegaremos a ${address} el ${when}. Responda CANCELAR para cancelar.`,
-};
-
 export function confirmationBody(
-  locale: Locale,
   address: string,
   window: TimeWindow,
   timeZone: string,
 ): string {
-  const template = TEMPLATES[locale] ?? TEMPLATES.en!;
-  return template(address, formatWindow(window, timeZone, locale));
+  const when = formatWindow(window, timeZone);
+  return `Confirmed: we'll be at ${address} on ${when}. Reply CANCEL to cancel.`;
 }
 
 /**
@@ -49,12 +49,8 @@ export function confirmationBody(
  * not the server's, because a booking that reads as the wrong day is worse than
  * no message at all.
  */
-export function formatWindow(
-  window: TimeWindow,
-  timeZone: string,
-  locale: Locale,
-): string {
-  const tag = locale === "es" ? "es-US" : "en-US";
+export function formatWindow(window: TimeWindow, timeZone: string): string {
+  const tag = "en-US";
   const start = new Date(window.startsAt);
   const end = new Date(window.endsAt);
 

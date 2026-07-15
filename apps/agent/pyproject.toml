@@ -1,0 +1,24 @@
+[project]
+name = "ledgerline-agent"
+version = "0.1.0"
+description = "Ledgerline LiveKit voice worker — the audio binding around the TypeScript CallRuntime."
+requires-python = ">=3.11"
+dependencies = [
+    # The audio loop: VAD, barge-in, turn detection. The exact layer the plan
+    # rents rather than builds, because turn-taking is the thing we must tune.
+    "livekit-agents>=0.11",
+    # Contracts crossing the language boundary. `agent/contracts.py` is generated
+    # from ../contracts.schema.json — never hand-written (plan.md, §10.4).
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+# Build-time only: turns the committed JSON Schema into agent/contracts.py.
+codegen = ["datamodel-code-generator>=0.25"]
+
+[tool.datamodel-codegen]
+# Pinned so regeneration is deterministic and the drift guard is meaningful.
+input-file-type = "jsonschema"
+output-model-type = "pydantic_v2.BaseModel"
+use-annotated = true
+enum-field-as-literal = "one"

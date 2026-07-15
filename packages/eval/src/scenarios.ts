@@ -1,11 +1,14 @@
 import type { Scenario } from "./simulate.js";
 
 /**
- * The personas from the plan: impatient, accented, code-switching, gives the
- * address wrong the first time, changes their mind mid-call.
+ * The personas from the plan: impatient, fragmentary, volunteers everything at
+ * once, gives the address wrong the first time, changes their mind mid-call.
  *
  * Each is a falsifiable claim about the product. They run in CI on every change
  * to the conversation core.
+ *
+ * `hazard/*` scenarios are the exception: they assert what the *safety classifier*
+ * does, which is bilingual on purpose even though the booking flow is not.
  */
 
 const MIAMI = {
@@ -68,21 +71,21 @@ export const SCENARIOS: readonly Scenario[] = [
   },
 
   {
-    name: "spanish/code-switched",
-    persona: "Switches between Spanish and English mid-sentence — the normal case.",
+    name: "english/answers-in-fragments",
+    persona: "Distracted, one clause at a time, never a full sentence.",
     turns: [
-      { text: "Hola, soy Rosa Delgado.", fills: [{ key: "caller_name", raw: "Rosa Delgado" }] },
-      { text: "Mi número es 305 555 7781.", fills: [{ key: "callback_phone", raw: "305-555-7781" }] },
+      { text: "Rosa Delgado.", fills: [{ key: "caller_name", raw: "Rosa Delgado" }] },
+      { text: "305 555 7781.", fills: [{ key: "callback_phone", raw: "305-555-7781" }] },
       {
-        text: "My water heater está leaking, necesito ayuda hoy.",
+        text: "Water heater's leaking. Need someone today.",
         fills: [
           { key: "problem_description", raw: "Water heater leaking" },
           { key: "urgency", raw: "SAME_DAY" },
         ],
       },
-      { text: "Vivo en el 1247 de la Calle Ocho.", fills: [{ key: "service_address", raw: MIAMI }] },
-      { text: "El jueves por la tarde.", fills: [{ key: "appointment_window", raw: THURSDAY }] },
-      { text: "Sí, correcto.", confirmsAll: true },
+      { text: "1247 Calle Ocho.", fills: [{ key: "service_address", raw: MIAMI }] },
+      { text: "Thursday afternoon.", fills: [{ key: "appointment_window", raw: THURSDAY }] },
+      { text: "Yeah, that's right.", confirmsAll: true },
     ],
     expect: {
       outcome: "BOOKED",
@@ -162,19 +165,24 @@ export const SCENARIOS: readonly Scenario[] = [
     },
   },
 
+  // The two scenarios below are the *product* being English-only and the *safety
+  // classifier* not being. A Spanish-speaking homeowner can dial an English-only
+  // shop, and panic reverts people to their first language. We will not book their
+  // job in Spanish, but we will absolutely get them out of the house.
+  // See `plan.md` principle #4 and `safety/english-only-pivot.test.ts`.
   {
-    name: "spanish/gas-leak-mid-call",
-    persona: "Starts a routine booking, then mentions a gas smell.",
+    name: "hazard/spanish-utterance-on-an-english-line",
+    persona: "Reverts to her first language the moment she smells gas.",
     turns: [
-      { text: "Hola, soy Marisol.", fills: [{ key: "caller_name", raw: "Marisol Peña" }] },
+      { text: "Hi, this is Marisol.", fills: [{ key: "caller_name", raw: "Marisol Peña" }] },
       { text: "Huele a gas en la cocina, no sé qué hacer." },
-      { text: "Está bien, salgo ahora." },
+      { text: "Okay, I'm going outside." },
     ],
     expect: { outcome: "ESCALATED_EMERGENCY", hazard: "GAS_LEAK" },
   },
 
   {
-    name: "spanish/no-heat-in-a-freeze",
+    name: "hazard/spanish-no-heat-in-a-freeze",
     persona: "Never says 'freezing'. We know it is, from the weather.",
     outdoorTempF: 18,
     turns: [{ text: "No tengo calefacción desde anoche." }],

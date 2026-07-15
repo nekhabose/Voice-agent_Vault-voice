@@ -3,7 +3,9 @@ import {
   VALID,
   type CallOutcome,
   type CallState,
+  type ExtractionContext,
   type HazardCategory,
+  type SlotExtractor,
   type SlotKey,
 } from "@ledgerline/contracts";
 import {
@@ -26,17 +28,26 @@ import {
 } from "@ledgerline/validators";
 
 /**
- * Simulated-caller harness (plan, Phase 2).
+ * Simulated-caller harness (plan, Step 5).
  *
  * A persona dials the agent and we score what came out. Runs the *real* state
- * machine, the *real* emergency classifier, and the *real* validators — the only
- * stub is the slot extractor, and that is deliberate: extraction quality is an
- * ASR/LLM question measured against audio in Phase 0, not something a
- * text-driven harness could honestly claim to test.
+ * machine, the *real* emergency classifier, the *real* validators, and — as of
+ * Step 5.1 — the *real* `SlotExtractor` port. The caller's utterance text is
+ * handed to `deps.makeExtractor(scenario).extract(key, text, ctx)`, exactly as
+ * `CallRuntime` does it; the PR suite binds `FakeExtractor` (scripted from the
+ * scenario's fills) and the nightly arm binds `AnthropicExtractor` over the same
+ * seam. The extractor is no longer a stub baked into the scenario — a fill now
+ * *declares* which slot a turn states and scripts the fake, and the value flows
+ * back through the port and the validators, not straight into the machine.
+ *
+ * Two things are still declarative rather than extracted, on purpose: whether a
+ * caller *confirms* a read-back (a yes/no is not a slot value), and the classifier
+ * runs on the raw text before any model, as it must (principle #4).
  *
  * The SIP path is out of scope here. This harness answers "given what the
- * caller said, does the system do the right thing?"; a real-SIP variant is what
- * makes the latency and barge-in numbers comparable to Full-Duplex-Bench-v3.
+ * caller said, does the system do the right thing?"; a real-SIP variant (task
+ * 5.3) is what makes the latency and barge-in numbers comparable to
+ * Full-Duplex-Bench-v3.
  */
 
 /** What the extractor would have produced from this utterance. */
@@ -76,6 +87,13 @@ export interface SimulationDeps {
   readonly geocoder: Geocoder;
   readonly windowPolicy: WindowPolicy;
   readonly serviceArea: GuardFn;
+  /**
+   * The extraction seam. Built per-scenario because the PR-suite fake is
+   * scripted from that scenario's fills; the nightly arm ignores the argument
+   * and hands back one `AnthropicExtractor`. Defaults to the scripted fake in
+   * `evalDeps()`, so the standard PR run needs no wiring.
+   */
+  readonly makeExtractor: (scenario: Scenario) => SlotExtractor;
 }
 
 export interface SimulationResult {
@@ -100,7 +118,8 @@ export interface SimulationResult {
   readonly readBacks: readonly SlotKey[];
 }
 
-const DEFAULT_CONFIDENCE = 0.95;
+/** What a fill with no stated confidence scripts the fake to report. */
+export const DEFAULT_CONFIDENCE = 0.95;
 
 export async function simulate(
   scenario: Scenario,
@@ -110,9 +129,12 @@ export async function simulate(
     guards: { ...BUILT_IN_GUARDS, address_in_service_area: deps.serviceArea },
   };
 
+  const extractor = deps.makeExtractor(scenario);
   let ctx: MachineContext = initialContext();
   const rejections: string[] = [];
   const readBacks: SlotKey[] = [];
+  /** Zero-based caller-utterance index, for the `ExtractionContext`. */
+  let callerTurnIndex = 0;
 
   /** Every transition funnels through here so no read-back goes unrecorded. */
   const step = (event: MachineEvent) => {
@@ -133,6 +155,16 @@ export async function simulate(
   for (const turn of scenario.turns) {
     if (terminal(ctx)) break;
     turnsTaken += 1;
+    const extractionContext: ExtractionContext = {
+      callId: scenario.name,
+      turnIndex: callerTurnIndex++,
+      // The eval's own clock and zone — the same two the `windowPolicy` validates
+      // the resulting window against. They must be the same two, or the model
+      // resolves "tomorrow afternoon" against one clock and the validator rejects
+      // it against another, and the failure looks like the model's.
+      now: deps.windowPolicy.clock.now().toISOString(),
+      timeZone: deps.windowPolicy.timeZone,
+    };
 
     // The classifier runs on every caller utterance, in parallel with and
     // independent of anything the extractor believes.
@@ -154,7 +186,14 @@ export async function simulate(
     }
 
     for (const fill of turn.fills ?? []) {
-      const result = step(await toEvent(fill, deps));
+      const event = await extractAndBuild(
+        extractor,
+        fill.key,
+        turn.text,
+        extractionContext,
+        deps,
+      );
+      const result = step(event);
       if (result.rejection) rejections.push(`${fill.key}: ${result.rejection}`);
       lastReadBack = pendingReadBack(result.effects) ?? lastReadBack;
       if (terminal(ctx)) break;
@@ -196,37 +235,70 @@ export async function simulate(
 }
 
 /**
- * Run the raw extraction through the same validators production uses. A
+ * The real path a caller's word takes: text → `SlotExtractor` → validators →
+ * machine event. This is the seam `CallRuntime` performs at, exercised here
+ * against a text-driven harness instead of a phone.
+ *
+ * An `unavailable` outcome is an outage, not a caller error (principle #3): one
+ * bounded retry behind an implied filler, then it is a human's problem — a new
+ * `AGENT_ERROR`, never a caller re-asked their name. This mirrors
+ * `CallRuntime.extractAndApply` exactly; the two are the same policy on the two
+ * sides of the port, and a change to one is a change to the contract both hold.
+ */
+async function extractAndBuild(
+  extractor: SlotExtractor,
+  key: SlotKey,
+  text: string,
+  ctx: ExtractionContext,
+  deps: SimulationDeps,
+): Promise<MachineEvent> {
+  let outcome = await extractor.extract(key, text, ctx);
+  if (outcome.kind === "unavailable") outcome = await extractor.extract(key, text, ctx);
+  if (outcome.kind === "unavailable") return { type: "AGENT_ERROR", reason: outcome.reason };
+  if (outcome.kind === "absent") return { type: "EXTRACTION_FAILED", key };
+  return toEvent(key, outcome.raw, outcome.confidence, deps);
+}
+
+/**
+ * Run one slot's raw extraction through the same validators production uses. A
  * validator that rejects the value produces an extraction failure rather than a
  * stored fact, which is what stops the machine from advancing.
+ *
+ * This is the same dispatch `packages/runtime/src/validate.ts` performs, kept
+ * here rather than shared because this one also builds a `MachineEvent`, and the
+ * two jobs pull apart the moment either changes. The validator *set* is the
+ * contract; a new one is a compile error in both places.
  */
-async function toEvent(fill: SlotFill, deps: SimulationDeps): Promise<MachineEvent> {
-  const confidence = fill.confidence ?? DEFAULT_CONFIDENCE;
-
-  switch (fill.key) {
+async function toEvent(
+  key: SlotKey,
+  raw: unknown,
+  confidence: number,
+  deps: SimulationDeps,
+): Promise<MachineEvent> {
+  switch (key) {
     case "callback_phone": {
-      const v = validatePhone(String(fill.raw));
+      const v = validatePhone(String(raw));
       return v.value === null
-        ? { type: "EXTRACTION_FAILED", key: fill.key }
-        : { type: "SLOT_FILLED", key: fill.key, value: v.value, input: { confidence, validatorResult: v.result } };
+        ? { type: "EXTRACTION_FAILED", key }
+        : { type: "SLOT_FILLED", key, value: v.value, input: { confidence, validatorResult: v.result } };
     }
     case "service_address": {
-      const v = await validateAddress(fill.raw as never, deps.geocoder);
+      const v = await validateAddress(raw as never, deps.geocoder);
       return v.value === null
-        ? { type: "EXTRACTION_FAILED", key: fill.key }
-        : { type: "SLOT_FILLED", key: fill.key, value: v.value, input: { confidence, validatorResult: v.result } };
+        ? { type: "EXTRACTION_FAILED", key }
+        : { type: "SLOT_FILLED", key, value: v.value, input: { confidence, validatorResult: v.result } };
     }
     case "appointment_window": {
-      const v = validateWindow(fill.raw as never, deps.windowPolicy);
+      const v = validateWindow(raw as never, deps.windowPolicy);
       return v.value === null
-        ? { type: "EXTRACTION_FAILED", key: fill.key }
-        : { type: "SLOT_FILLED", key: fill.key, value: v.value, input: { confidence, validatorResult: v.result } };
+        ? { type: "EXTRACTION_FAILED", key }
+        : { type: "SLOT_FILLED", key, value: v.value, input: { confidence, validatorResult: v.result } };
     }
     default:
       return {
         type: "SLOT_FILLED",
-        key: fill.key,
-        value: fill.raw,
+        key,
+        value: raw,
         input: { confidence, validatorResult: VALID },
       };
   }

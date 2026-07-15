@@ -9,7 +9,12 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@ledgerline/compliance": "*",
     "@ledgerline/contracts": "*",
-    "@ledgerline/crm": "*"
+    "@ledgerline/crm": "*",
+    "@ledgerline/telemetry": "*"
+  },
+  "devDependencies": {
+    "@ledgerline/triage": "*"
   }
 }

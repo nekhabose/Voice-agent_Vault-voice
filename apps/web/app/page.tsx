@@ -10,6 +10,7 @@ import {
   LIVE_CALLS,
   METRICS,
   NEEDS_ATTENTION,
+  PUBLISHED,
   clockTime,
   ms,
   pct,
@@ -75,7 +76,7 @@ export default function Dashboard() {
           <div className="card-head">
             <h2>In progress</h2>
             <Badge tone="live" pulse>
-              {call.locale === "es" ? "Spanish" : "English"}
+              Live
             </Badge>
           </div>
           <div className="live-body">
@@ -105,6 +106,23 @@ export default function Dashboard() {
             value={pct(METRICS.correctionRate)}
             foot="Measured from your edits, not our guess"
             tone={METRICS.correctionRate > 0 ? "bad" : "good"}
+          />
+          {/*
+            The triaged number sits *beside* the raw one and never replaces it.
+            Until the weekly human audit is big enough to vouch for the
+            classifier, `PUBLISHED.basis` is "raw" and this tile says so — a model
+            that decides which of our mistakes count is a model with an obvious
+            interest in the answer (plan, Step 6).
+          */}
+          <Stat
+            label="…and were our fault"
+            value={pct(METRICS.agentErrorRate)}
+            foot={
+              PUBLISHED.basis === "agent_error"
+                ? `Published, at ${pct(METRICS.triageAgreementRate)} human agreement`
+                : `Not published yet — ${METRICS.auditedOutcomes} audited, so we quote the number above`
+            }
+            tone={METRICS.agentErrorRate > 0 ? "bad" : "good"}
           />
           <Stat
             label="Time to first word (p95)"
@@ -138,10 +156,7 @@ export default function Dashboard() {
           <a key={call.record.id} href={`/calls/${call.record.id}`} className="row">
             <span className="row-time tabular">{clockTime(call.record.startedAt)}</span>
             <span className="row-main">
-              <span className="row-title">
-                {call.callerName}
-                {call.locale === "es" && <Badge tone="muted">ES</Badge>}
-              </span>
+              <span className="row-title">{call.callerName}</span>
               <span className="row-sub">{call.summary}</span>
             </span>
             <OutcomeBadge outcome={call.record.outcome} />

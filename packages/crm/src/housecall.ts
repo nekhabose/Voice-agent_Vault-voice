@@ -1,11 +1,27 @@
-import type { Address } from "@ledgerline/contracts";
-import type { HttpRequest, HttpResponse, HttpTransport } from "./http.js";
+import type {
+  Address,
+  AddressInput,
+  HttpRequest,
+  HttpResponse,
+  HttpTransport,
+  TimeWindow,
+} from "@ledgerline/contracts";
+
+import {
+  asRecord,
+  deletedSnapshot,
+  joinName,
+  str,
+  timeWindow,
+} from "./snapshot.js";
 import {
   CrmError,
   isRetryableStatus,
   type CrmAdapter,
   type CrmCustomerRef,
   type CrmJobRef,
+  type CrmJobSnapshot,
+  type CrmJobStatus,
   type CrmLocationRef,
   type CustomerInput,
   type JobInput,
@@ -93,6 +109,32 @@ export class HousecallProAdapter implements CrmAdapter {
     return { id: requireId(response.body, "job") };
   }
 
+  async readJob(ref: CrmJobRef, _ctx: OpContext): Promise<CrmJobSnapshot> {
+    // A 404 means the contractor deleted the job. We only ever poll ids we
+    // created, so there is no other reading, and it is an outcome rather than
+    // an error. Every other status still throws — an outage must not be
+    // reported as a clean job.
+    const response = await this.request(
+      { method: "GET", path: `/jobs/${ref.id}` },
+      { tolerate: [404] },
+    );
+
+    if (response.status === 404) {
+      return deletedSnapshot(ref.id, response.body);
+    }
+
+    const body = asRecord(response.body);
+    return {
+      jobId: ref.id,
+      status: jobStatus(str(body["work_status"])),
+      window: window(asRecord(body["schedule"])),
+      description: str(body["description"]),
+      address: address(asRecord(body["address"])),
+      customer: customer(asRecord(body["customer"])),
+      raw: response.body,
+    };
+  }
+
   async revokeJob(ref: CrmJobRef, ctx: OpContext): Promise<void> {
     await this.request({
       method: "DELETE",
@@ -111,7 +153,10 @@ export class HousecallProAdapter implements CrmAdapter {
     });
   }
 
-  private async request(request: HttpRequest): Promise<HttpResponse> {
+  private async request(
+    request: HttpRequest,
+    options: { tolerate?: readonly number[] } = {},
+  ): Promise<HttpResponse> {
     let response: HttpResponse;
     try {
       response = await this.http.send(request);
@@ -121,6 +166,8 @@ export class HousecallProAdapter implements CrmAdapter {
       const message = error instanceof Error ? error.message : String(error);
       throw new CrmError(`housecall pro transport: ${message}`, PROVIDER, null, true);
     }
+
+    if (options.tolerate?.includes(response.status)) return response;
 
     if (response.status >= 400) {
       throw new CrmError(
@@ -135,6 +182,51 @@ export class HousecallProAdapter implements CrmAdapter {
 }
 
 const idempotency = (ctx: OpContext) => ({ "Idempotency-Key": ctx.idempotencyKey });
+
+/* -------------------------------------------------------------------------- */
+/* Reading a job back                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Housecall Pro's `work_status` is an open-ish vocabulary — `scheduled`,
+ * `in progress`, `completed`, `canceled`, `pro canceled`, `needs scheduling`.
+ * We match on substrings so a new cancellation flavour lands as `CANCELLED`
+ * rather than silently as `SCHEDULED`; under-reporting a cancellation is the
+ * error that flatters us.
+ *
+ * Unverified against a live sandbox — see plan.md Step 4.10.
+ */
+function jobStatus(workStatus: string | null): CrmJobStatus {
+  if (workStatus === null) return "SCHEDULED";
+  const status = workStatus.toLowerCase();
+  if (status.includes("cancel")) return "CANCELLED";
+  if (status.includes("complete")) return "COMPLETED";
+  return "SCHEDULED";
+}
+
+function window(schedule: Record<string, unknown>): TimeWindow | null {
+  return timeWindow(schedule["scheduled_start"], schedule["scheduled_end"]);
+}
+
+function address(raw: Record<string, unknown>): AddressInput | null {
+  const line1 = str(raw["street"]);
+  const city = str(raw["city"]);
+  const state = str(raw["state"]);
+  const postalCode = str(raw["zip"]);
+  if (line1 === null || city === null || state === null || postalCode === null) {
+    return null;
+  }
+
+  const line2 = str(raw["street_line_2"]);
+  return { line1, city, state, postalCode, ...(line2 === null ? {} : { line2 }) };
+}
+
+function customer(raw: Record<string, unknown>): CrmJobSnapshot["customer"] {
+  return {
+    name: joinName(raw["first_name"], raw["last_name"]),
+    phone: str(raw["mobile_number"]),
+  };
+}
 
 function firstCustomerId(body: unknown): string | null {
   if (typeof body !== "object" || body === null) return null;

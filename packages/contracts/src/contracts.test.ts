@@ -2,17 +2,24 @@ import { describe, expect, it } from "vitest";
 import {
   CALL_STATES,
   CRITICAL_ASR_SLOTS,
+  EFFECT_TYPES,
   EMERGENCY_INTERRUPTIBLE_STATES,
   E164Schema,
+  EffectSchema,
   HAZARD_ACTIONS,
   HAZARD_CATEGORIES,
   LOW_CONFIDENCE_THRESHOLD,
   PendingBookingPayloadSchema,
+  RUNTIME_ONLY_EFFECT_TYPES,
   SLOT_KEYS,
   SLOT_SPECS,
   STATE_SPECS,
   TimeWindowSchema,
+  effectiveLabel,
+  isCorrected,
+  type BookingOutcome,
   type CallState,
+  type Effect,
 } from "./index.js";
 
 describe("slot registry", () => {
@@ -40,6 +47,42 @@ describe("slot registry", () => {
     ] as const) {
       expect(SLOT_SPECS[key].confirmation).toBe("always");
     }
+  });
+
+  it("gives every slot an extraction schema", () => {
+    // `packages/extraction` derives the model's tool schema from this. A slot
+    // without one has no defined output space for the model.
+    for (const key of SLOT_KEYS) {
+      expect(SLOT_SPECS[key].extraction).toBeDefined();
+    }
+  });
+
+  it("never lets the model produce a geocoder-owned or validator-owned value", () => {
+    // The extraction schema is deliberately narrower than the storage schema.
+    // These two assertions are the boundary; widening either hands the model a
+    // job that `packages/validators` is supposed to do (principle #3).
+    expect(SLOT_SPECS.service_address.extraction.safeParse({
+      line1: "1 Main St",
+      city: "Austin",
+      state: "TX",
+      postalCode: "78704",
+      formatted: "hallucinated",
+      lat: 30.2,
+      lng: -97.7,
+    }).success).toBe(true);
+    expect(
+      SLOT_SPECS.service_address.extraction.parse({
+        line1: "1 Main St",
+        city: "Austin",
+        state: "TX",
+        postalCode: "78704",
+        formatted: "hallucinated",
+      }),
+    ).not.toHaveProperty("formatted");
+
+    // Spoken digits, not E.164 — `validatePhone` owns the normalisation.
+    expect(SLOT_SPECS.callback_phone.extraction.safeParse("305 555 0142").success).toBe(true);
+    expect(SLOT_SPECS.callback_phone.schema.safeParse("305 555 0142").success).toBe(false);
   });
 });
 
@@ -224,5 +267,109 @@ describe("PendingBookingPayload", () => {
       address: { ...valid.address, lat: 25.7651, lng: -80.2197 },
     });
     expect(parsed.address.lat).toBeCloseTo(25.7651);
+  });
+});
+
+/**
+ * `Effect` crosses two boundaries: into `Utterer`, and — at Step 4.1 — into the
+ * Python worker as generated Pydantic. Both need it parsed, not just typed.
+ */
+describe("effects", () => {
+  const EVERY_EFFECT: readonly Effect[] = [
+    { type: "GREET" },
+    { type: "ASK_FOR", key: "caller_name" },
+    { type: "READ_BACK", key: "service_address" },
+    {
+      type: "ESCALATE",
+      reason: "EMERGENCY_HAZARD",
+      action: "DIAL_911_GUIDANCE",
+      hazard: {
+        category: "GAS_LEAK",
+        action: "DIAL_911_GUIDANCE",
+        matchedText: "smells like gas",
+        ruleId: "gas.smell_verb+gas_noun",
+      },
+    },
+    { type: "CREATE_PENDING_BOOKING" },
+    { type: "SAY_FILLER" },
+    { type: "ANSWER_FAQ", answer: "Estimates are free for replacements." },
+  ];
+
+  it("parses one of every effect the voice runtime can perform", () => {
+    for (const effect of EVERY_EFFECT) {
+      expect(EffectSchema.safeParse(effect).success).toBe(true);
+    }
+    expect(EVERY_EFFECT.map((e) => e.type).sort()).toEqual([...EFFECT_TYPES].sort());
+  });
+
+  /**
+   * Two effects the machine never emits, and a reader of `machine.ts` who cannot
+   * find where they are produced must not conclude they are dead. `CallRuntime`
+   * produces them, on a turn the caller spent asking us a question instead of
+   * answering ours — which changes no slot, no state, and no guard.
+   */
+  it("names the two effects `transition()` never emits", () => {
+    expect([...RUNTIME_ONLY_EFFECT_TYPES].sort()).toEqual(["ANSWER_FAQ", "SAY_FILLER"]);
+    for (const type of RUNTIME_ONLY_EFFECT_TYPES) {
+      expect(EFFECT_TYPES).toContain(type);
+    }
+  });
+
+  /** `null` is "no committed answer covers this", and it is a sentence, not a silence. */
+  it("lets an FAQ answer be null, because not knowing is an answer", () => {
+    expect(EffectSchema.safeParse({ type: "ANSWER_FAQ", answer: null }).success).toBe(true);
+    expect(EffectSchema.safeParse({ type: "ANSWER_FAQ" }).success).toBe(false);
+  });
+
+  it("rejects an effect type the voice runtime would not know how to perform", () => {
+    expect(EffectSchema.safeParse({ type: "HANG_UP" }).success).toBe(false);
+  });
+
+  it("requires an escalation to say whether a hazard fired", () => {
+    const r = EffectSchema.safeParse({
+      type: "ESCALATE",
+      reason: "CALLER_REQUESTED_HUMAN",
+      action: "WARM_TRANSFER",
+    });
+    expect(r.success).toBe(false);
+  });
+
+  /** The AI disclosure needs an effect to ride on, or nobody ever speaks it. */
+  it("carries GREET, which is where the disclosure is spoken", () => {
+    expect(EFFECT_TYPES).toContain("GREET");
+  });
+});
+
+/**
+ * `isCorrected` and `effectiveLabel` are the two sentences `telemetry` and
+ * `workflows` must agree on, so they live here. A disagreement between them is a
+ * published number that does not add up: one counts a booking as failed and the
+ * other never sends it for triage.
+ */
+describe("outcome labels (Step 6)", () => {
+  const outcome = (over: Partial<BookingOutcome> = {}): BookingOutcome => ({
+    bookingId: "b8f0d3c2-9a1e-4c7b-8f2d-6e5a4b3c2d1e",
+    cancelled: false,
+    correctedFields: {},
+    source: "CRM_POLL",
+    classification: null,
+    humanLabel: null,
+    observedAt: "2026-07-11T18:00:00.000Z",
+    ...over,
+  });
+
+  it("counts a cancellation and an edit alike, because both are failures", () => {
+    expect(isCorrected(outcome({ cancelled: true }))).toBe(true);
+    expect(isCorrected(outcome({ correctedFields: { caller_name: "Dana" } }))).toBe(true);
+    expect(isCorrected(outcome())).toBe(false);
+  });
+
+  /** The human is the point of the audit. A tie-break for the model makes it decorative. */
+  it("lets the human auditor override the model", () => {
+    expect(
+      effectiveLabel(outcome({ classification: "enrichment", humanLabel: "agent_error" })),
+    ).toBe("agent_error");
+    expect(effectiveLabel(outcome({ classification: "enrichment" }))).toBe("enrichment");
+    expect(effectiveLabel(outcome())).toBeNull();
   });
 });

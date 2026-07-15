@@ -5,6 +5,7 @@ import {
   weekdayHours,
   type Polygon,
 } from "@ledgerline/validators";
+import { scriptedExtractor } from "./extractors.js";
 import type { SimulationDeps } from "./simulate.js";
 
 /** Little Havana and the surrounding blocks, in GeoJSON `[lng, lat]` order. */
@@ -48,5 +49,8 @@ export function evalDeps(): SimulationDeps {
       timeZone: "America/New_York",
       hours: weekdayHours("08:00", "18:00"),
     },
+    // The PR arm: a fresh fake scripted from each scenario's fills. The nightly
+    // arm overrides this with `anthropicExtractor(client)` (plan, Step 5.1).
+    makeExtractor: scriptedExtractor,
   };
 }

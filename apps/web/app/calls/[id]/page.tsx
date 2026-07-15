@@ -36,9 +36,7 @@ export default async function CallPage({
       <div className="hero" style={{ paddingBottom: 24 }}>
         <h1 style={{ fontSize: 28 }}>{call.callerName}</h1>
         <p className="hero-sub">
-          {clockTime(call.record.startedAt)} · {call.record.fromE164} ·{" "}
-          {call.locale === "es" ? "Spanish" : "English"}
-          {call.record.localesDetected.length > 1 && " (code-switched)"}
+          {clockTime(call.record.startedAt)} · {call.record.fromE164}
         </p>
       </div>
 

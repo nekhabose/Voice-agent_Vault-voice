@@ -1,5 +1,8 @@
 import {
   CONTAINED_OUTCOMES,
+  isAgentError,
+  isCorrected,
+  latestPerBooking,
   type BookingOutcome,
   type CallRecord,
   type CallTurn,
@@ -58,10 +61,19 @@ export function computeMetrics(input: MetricsInput): ReliabilityMetrics {
     .map((t) => t.turnLatencyMs)
     .filter((ms): ms is number => ms !== null);
 
+  const corrected = latestPerBooking(input.outcomes).filter(isCorrected);
+  const audited = corrected.filter(
+    (o) => o.humanLabel !== null && o.classification !== null,
+  );
+  const agreed = audited.filter((o) => o.humanLabel === o.classification);
+
   return {
     calls: input.calls.length,
     containmentRate: ratio(contained.length, finished.length),
-    correctionRate: ratio(countCorrected(input.outcomes), input.committedBookings),
+    correctionRate: ratio(corrected.length, input.committedBookings),
+    agentErrorRate: ratio(corrected.filter(isAgentError).length, input.committedBookings),
+    auditedOutcomes: audited.length,
+    triageAgreementRate: ratio(agreed.length, audited.length),
     bargeInRate: ratio(agentTurns.filter((t) => t.bargeIn).length, agentTurns.length),
     turnTakeRate: ratio(agentTurns.filter((t) => t.turnTakeOk).length, agentTurns.length),
     firstWordLatencyP50Ms: percentile(firstWord, 0.5),
@@ -71,14 +83,92 @@ export function computeMetrics(input: MetricsInput): ReliabilityMetrics {
 }
 
 /**
- * A booking is "corrected" if the contractor cancelled it or edited any field.
- * Either way we got it wrong; counting them separately would let us report the
- * flattering half.
+ * `latestPerBooking` and `isAgentError` moved into `contracts` in Step 7, because
+ * `packages/billing` now asks the same two questions and a disagreement between them
+ * would invoice a contractor for a booking we had publicly called our own error. Same
+ * argument that moved `isCorrected` and `effectiveLabel` there in Step 6.
  */
-function countCorrected(outcomes: readonly BookingOutcome[]): number {
-  return outcomes.filter(
-    (o) => o.cancelled || Object.keys(o.correctedFields).length > 0,
-  ).length;
+
+/* -------------------------------------------------------------------------- */
+/* What we are allowed to publish                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * "If model and human disagree more than ~5% of the time, publish the raw
+ * correction rate and drop the classifier until it earns its place" (plan, Step
+ * 6). That sentence, as a function.
+ */
+export const AUDIT_AGREEMENT_FLOOR = 0.95;
+
+/**
+ * Below this many audited corrections, the agreement rate is noise and cannot
+ * license anything. Three audits that happened to agree is not evidence; it is a
+ * small number that flatters us, and the whole point of Step 6.3 is to stop
+ * ourselves from reasoning that way.
+ */
+export const MIN_AUDITED_OUTCOMES = 20;
+
+export interface PublishedRate {
+  /** The number that goes on the website. */
+  readonly rate: number;
+  readonly basis: "agent_error" | "raw";
+  /** Published with it, always. A rate without its basis is a claim without a method. */
+  readonly reason: string;
+}
+
+/**
+ * The four figures the licensing rule actually reads.
+ *
+ * Narrowed from `ReliabilityMetrics` in Step 9 so that the **cross-tenant** publication
+ * path (`decidePublication`, over a `CohortStats` that has no latency or containment in
+ * it) and the **per-tenant** dashboard path can share one copy of this decision. A second
+ * implementation of "may we quote the triaged rate" is a second implementation that can
+ * drift from the first, and the two would then disagree about what we told a contractor
+ * versus what we told the world.
+ *
+ * `ReliabilityMetrics` still satisfies it structurally, so every existing caller is
+ * unchanged.
+ */
+export type LicensableRates = Pick<
+  ReliabilityMetrics,
+  "correctionRate" | "agentErrorRate" | "auditedOutcomes" | "triageAgreementRate"
+>;
+
+/**
+ * The number we are entitled to put in front of a contractor, and why.
+ *
+ * The triaged rate is *earned*, not assumed: it is used only while a human audit
+ * of meaningful size says the classifier is telling the truth. Until then — and
+ * the moment agreement slips — we publish the raw correction rate, which is worse
+ * for us and true.
+ *
+ * This is principle #5's corollary made mechanical. The temptation, on the day the
+ * raw number embarrasses us, is to point at the classifier and say most of those
+ * were not really our fault. This function is what we wrote down *before* that
+ * day, and it is deliberately hard to argue with afterwards.
+ */
+export function publishedCorrectionRate(metrics: LicensableRates): PublishedRate {
+  if (metrics.auditedOutcomes < MIN_AUDITED_OUTCOMES) {
+    return {
+      rate: metrics.correctionRate,
+      basis: "raw",
+      reason: `only ${metrics.auditedOutcomes} audited corrections; the classifier has not earned its place (needs ${MIN_AUDITED_OUTCOMES})`,
+    };
+  }
+
+  if (metrics.triageAgreementRate < AUDIT_AGREEMENT_FLOOR) {
+    return {
+      rate: metrics.correctionRate,
+      basis: "raw",
+      reason: `the classifier agrees with the human auditor only ${(metrics.triageAgreementRate * 100).toFixed(1)}% of the time; below ${AUDIT_AGREEMENT_FLOOR * 100}% we do not use it`,
+    };
+  }
+
+  return {
+    rate: metrics.agentErrorRate,
+    basis: "agent_error",
+    reason: `corrections attributed to the agent, over ${metrics.auditedOutcomes} audited labels at ${(metrics.triageAgreementRate * 100).toFixed(1)}% human agreement`,
+  };
 }
 
 /** The latency budget from the plan. Exceeding either is a release blocker. */

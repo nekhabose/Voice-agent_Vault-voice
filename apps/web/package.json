@@ -8,9 +8,18 @@
     "start": "next start"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@ledgerline/billing": "*",
+    "@ledgerline/compliance": "*",
     "@ledgerline/contracts": "*",
     "@ledgerline/conversation": "*",
+    "@ledgerline/crm": "*",
+    "@ledgerline/db": "*",
+    "@ledgerline/groq": "*",
     "@ledgerline/telemetry": "*",
+    "@ledgerline/triage": "*",
+    "@ledgerline/workflows": "*",
+    "drizzle-orm": "^0.45.2",
     "next": "^15.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
